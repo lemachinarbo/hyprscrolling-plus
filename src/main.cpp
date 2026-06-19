@@ -33,6 +33,8 @@
 #include <hyprland/src/layout/LayoutManager.hpp>
 #include <hyprland/src/layout/algorithm/Algorithm.hpp>
 #include <hyprland/src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.hpp>
+#include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
+#include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
 #undef private
 
 
@@ -43,6 +45,7 @@ static Hyprutils::Signal::CHyprSignalListener activeWorkspaceListener;
 static Hyprutils::Signal::CHyprSignalListener fullscreenListener;
 static Hyprutils::Signal::CHyprSignalListener windowOpenListener;
 static Hyprutils::Signal::CHyprSignalListener windowCloseListener;
+static SP<CEventLoopTimer> pFullscreenRestoreTimer = nullptr;
 
 APICALL EXPORT std::string PLUGIN_API_VERSION() {
     return HYPRLAND_API_VERSION;
@@ -332,23 +335,39 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         logState("Window fullscreen state changed on " + getAddressStr(w));
         
         if (w && !w->isFullscreen() && w->m_workspace) {
-            // Defer the first focus change to the next idle cycle to let Hyprland complete the fullscreen transition
-            g_pEventLoopManager->doLater([w]() {
-                if (!w || w->isHidden() || !w->m_isMapped) return;
+            // Cancel previous timer if any was running to avoid overlaps
+            if (pFullscreenRestoreTimer) {
+                pFullscreenRestoreTimer->cancel();
+                pFullscreenRestoreTimer.reset();
+            }
 
-                // Try to get CScrollingAlgorithm
-                PHLMONITOR pActiveMonitor = g_pCompositor->getMonitorFromCursor();
-                if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) {
+            pFullscreenRestoreTimer = Hyprutils::Memory::makeShared<CEventLoopTimer>(std::chrono::milliseconds(100), [w](SP<CEventLoopTimer>, void*) {
+                if (!w || w->isHidden() || !w->m_isMapped) {
+                    pFullscreenRestoreTimer.reset();
                     return;
                 }
 
-                if (!pActiveMonitor->m_activeWorkspace->m_space || !pActiveMonitor->m_activeWorkspace->m_space->algorithm()) {
+                if (!w->m_workspace) {
+                    pFullscreenRestoreTimer.reset();
                     return;
                 }
 
-                auto pTiled = pActiveMonitor->m_activeWorkspace->m_space->algorithm()->tiledAlgo().get();
+                auto pWorkspace = w->m_workspace;
+                auto pMonitor = pWorkspace->m_monitor.lock();
+                if (!pMonitor) {
+                    pFullscreenRestoreTimer.reset();
+                    return;
+                }
+
+                if (!pWorkspace->m_space || !pWorkspace->m_space->algorithm()) {
+                    pFullscreenRestoreTimer.reset();
+                    return;
+                }
+
+                auto pTiled = pWorkspace->m_space->algorithm()->tiledAlgo().get();
                 Layout::Tiled::CScrollingAlgorithm* pScrolling = dynamic_cast<Layout::Tiled::CScrollingAlgorithm*>(pTiled);
                 if (!pScrolling) {
+                    pFullscreenRestoreTimer.reset();
                     return;
                 }
 
@@ -364,8 +383,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
                     }
                 }
 
-                g_layoutManager->recalculateMonitor(pActiveMonitor);
-            });
+                g_layoutManager->recalculateMonitor(pMonitor);
+                pFullscreenRestoreTimer.reset();
+            }, nullptr);
+
+            g_pEventLoopManager->addTimer(pFullscreenRestoreTimer);
         }
     });
 
@@ -393,4 +415,9 @@ APICALL EXPORT void PLUGIN_EXIT() {
     fullscreenListener.reset();
     windowOpenListener.reset();
     windowCloseListener.reset();
+
+    if (pFullscreenRestoreTimer) {
+        pFullscreenRestoreTimer->cancel();
+        pFullscreenRestoreTimer.reset();
+    }
 }
