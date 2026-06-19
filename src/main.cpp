@@ -31,13 +31,13 @@
 #undef private
 
 
-inline HANDLE PHANDLE = nullptr;
+static HANDLE PHANDLE = nullptr;
 
-inline Hyprutils::Signal::CHyprSignalListener activeWindowListener;
-inline Hyprutils::Signal::CHyprSignalListener activeWorkspaceListener;
-inline Hyprutils::Signal::CHyprSignalListener fullscreenListener;
-inline Hyprutils::Signal::CHyprSignalListener windowOpenListener;
-inline Hyprutils::Signal::CHyprSignalListener windowCloseListener;
+static Hyprutils::Signal::CHyprSignalListener activeWindowListener;
+static Hyprutils::Signal::CHyprSignalListener activeWorkspaceListener;
+static Hyprutils::Signal::CHyprSignalListener fullscreenListener;
+static Hyprutils::Signal::CHyprSignalListener windowOpenListener;
+static Hyprutils::Signal::CHyprSignalListener windowCloseListener;
 
 APICALL EXPORT std::string PLUGIN_API_VERSION() {
     return HYPRLAND_API_VERSION;
@@ -313,6 +313,7 @@ SDispatchResult handleToggleCenter(std::string) {
 
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     PHANDLE = handle;
+    logState("PLUGIN_INIT called");
 
     const std::string COMPOSITOR_HASH = __hyprland_api_get_hash();
     const std::string CLIENT_HASH = __hyprland_api_get_client_hash();
@@ -425,6 +426,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
+    logState("PLUGIN_EXIT called");
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus:partitions");
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus:togglecenter");
 
