@@ -316,12 +316,36 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
                 }
 
                 if (ws_windows.size() > 1) {
-                    // Find another window on the workspace to shift focus to briefly
-                    PHLWINDOW pOther = nullptr;
-                    for (auto const& win : ws_windows) {
-                        if (win != w) {
-                            pOther = win;
+                    // Sort left-to-right to find physical adjacencies
+                    std::sort(ws_windows.begin(), ws_windows.end(), [](const PHLWINDOW& a, const PHLWINDOW& b) {
+                        return a->m_position.x < b->m_position.x;
+                    });
+
+                    // Find the index of the fullscreen window w in the sorted list
+                    int w_idx = -1;
+                    for (size_t i = 0; i < ws_windows.size(); ++i) {
+                        if (ws_windows[i] == w) {
+                            w_idx = i;
                             break;
+                        }
+                    }
+
+                    PHLWINDOW pOther = nullptr;
+                    if (w_idx != -1) {
+                        if (w_idx > 0) {
+                            pOther = ws_windows[w_idx - 1];
+                        } else if (w_idx < (int)ws_windows.size() - 1) {
+                            pOther = ws_windows[w_idx + 1];
+                        }
+                    }
+
+                    // Fallback to first non-self window if index was not found
+                    if (!pOther) {
+                        for (auto const& win : ws_windows) {
+                            if (win != w) {
+                                pOther = win;
+                                break;
+                            }
                         }
                     }
 
