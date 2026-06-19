@@ -35,6 +35,7 @@
 #include <hyprland/src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
+#include <hyprland/src/render/Renderer.hpp>
 #undef private
 
 
@@ -157,6 +158,8 @@ static int64_t getConfigValueInt(const std::string& name, int64_t defaultValue) 
             return *(long*)(*reply.dataptr);
         } else if (*reply.type == typeid(long long)) {
             return *(long long*)(*reply.dataptr);
+        } else if (*reply.type == typeid(bool)) {
+            return *(bool*)(*reply.dataptr);
         }
     }
     return defaultValue;
@@ -173,8 +176,144 @@ static void setConfigValueInt(const std::string& name, int64_t value) {
             *(long*)(*reply.dataptr) = (long)value;
         } else if (*reply.type == typeid(long long)) {
             *(long long*)(*reply.dataptr) = (long long)value;
+        } else if (*reply.type == typeid(bool)) {
+            *(bool*)(*reply.dataptr) = (bool)value;
         }
     }
+}
+
+static double getConfigValueFloat(const std::string& name, double defaultValue) {
+    auto reply = Config::mgr()->getConfigValue(name);
+    if (reply.dataptr && reply.type) {
+        if (*reply.type == typeid(float)) {
+            return *(float*)(*reply.dataptr);
+        } else if (*reply.type == typeid(double)) {
+            return *(double*)(*reply.dataptr);
+        }
+    }
+    return defaultValue;
+}
+
+static void setConfigValueFloat(const std::string& name, double value) {
+    auto reply = Config::mgr()->getConfigValue(name);
+    if (reply.dataptr && reply.type) {
+        if (*reply.type == typeid(float)) {
+            *(float*)(*reply.dataptr) = (float)value;
+        } else if (*reply.type == typeid(double)) {
+            *(double*)(*reply.dataptr) = value;
+        }
+    }
+}
+
+static bool g_zenModeActive = false;
+static double g_savedInactiveOpacity = 1.0;
+static bool g_savedDimInactive = false;
+static int64_t g_savedFocusFitMethod = 1;
+
+SDispatchResult handleToggleZen(std::string args) {
+    logState("Dispatcher: togglezen " + args);
+
+    double target_opacity = 0.0;
+    if (!args.empty()) {
+        try {
+            target_opacity = std::stod(args);
+        } catch (...) {
+            target_opacity = 0.0;
+        }
+    }
+
+    PHLMONITOR pActiveMonitor = g_pCompositor->getMonitorFromCursor();
+    if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) {
+        return {false, false, "No active workspace found"};
+    }
+
+    if (g_zenModeActive) {
+        int64_t target_fit_method = g_savedFocusFitMethod;
+        
+        if (pActiveMonitor->m_activeWorkspace->m_space && pActiveMonitor->m_activeWorkspace->m_space->algorithm()) {
+            auto pTiled = pActiveMonitor->m_activeWorkspace->m_space->algorithm()->tiledAlgo().get();
+            Layout::Tiled::CScrollingAlgorithm* pScrolling = dynamic_cast<Layout::Tiled::CScrollingAlgorithm*>(pTiled);
+            if (pScrolling) {
+                double col_width = 0.5;
+                auto reply = Config::mgr()->getConfigValue("scrolling:column_width");
+                if (reply.dataptr && reply.type) {
+                    if (*reply.type == typeid(float)) {
+                        col_width = *(float*)(*reply.dataptr);
+                    } else if (*reply.type == typeid(double)) {
+                        col_width = *(double*)(*reply.dataptr);
+                    }
+                }
+                if (col_width < 0.9) {
+                    target_fit_method = 0;
+                } else {
+                    target_fit_method = 1;
+                }
+            }
+        }
+
+        setConfigValueFloat("decoration:inactive_opacity", g_savedInactiveOpacity);
+        setConfigValueInt("decoration:dim_inactive", g_savedDimInactive);
+        setConfigValueInt("scrolling:focus_fit_method", target_fit_method);
+
+        g_zenModeActive = false;
+        
+        if (pActiveMonitor->m_activeWorkspace->m_space && pActiveMonitor->m_activeWorkspace->m_space->algorithm()) {
+            auto pTiled = pActiveMonitor->m_activeWorkspace->m_space->algorithm()->tiledAlgo().get();
+            Layout::Tiled::CScrollingAlgorithm* pScrolling = dynamic_cast<Layout::Tiled::CScrollingAlgorithm*>(pTiled);
+            if (pScrolling) {
+                PHLWINDOW pActiveWindow = Desktop::focusState()->window();
+                if (pActiveWindow) {
+                    SP<Layout::ITarget> pTarget = getTargetForWindow(pActiveWindow);
+                    if (pTarget) {
+                        auto pTargetData = pScrolling->dataFor(pTarget);
+                        if (pTargetData && pTargetData->column) {
+                            auto pColumn = pTargetData->column.lock();
+                            if (pColumn) {
+                                alignActiveColumn(pScrolling, pColumn, target_fit_method);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        g_savedInactiveOpacity = getConfigValueFloat("decoration:inactive_opacity", 1.0);
+        g_savedDimInactive = getConfigValueInt("decoration:dim_inactive", 0) != 0;
+        g_savedFocusFitMethod = getConfigValueInt("scrolling:focus_fit_method", 1);
+
+        setConfigValueFloat("decoration:inactive_opacity", target_opacity);
+        setConfigValueInt("decoration:dim_inactive", 1);
+        setConfigValueInt("scrolling:focus_fit_method", 0);
+
+        g_zenModeActive = true;
+
+        if (pActiveMonitor->m_activeWorkspace->m_space && pActiveMonitor->m_activeWorkspace->m_space->algorithm()) {
+            auto pTiled = pActiveMonitor->m_activeWorkspace->m_space->algorithm()->tiledAlgo().get();
+            Layout::Tiled::CScrollingAlgorithm* pScrolling = dynamic_cast<Layout::Tiled::CScrollingAlgorithm*>(pTiled);
+            if (pScrolling) {
+                PHLWINDOW pActiveWindow = Desktop::focusState()->window();
+                if (pActiveWindow) {
+                    SP<Layout::ITarget> pTarget = getTargetForWindow(pActiveWindow);
+                    if (pTarget) {
+                        auto pTargetData = pScrolling->dataFor(pTarget);
+                        if (pTargetData && pTargetData->column) {
+                            auto pColumn = pTargetData->column.lock();
+                            if (pColumn) {
+                                alignActiveColumn(pScrolling, pColumn, 0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    g_layoutManager->recalculateMonitor(pActiveMonitor);
+    if (g_pHyprRenderer) {
+        g_pHyprRenderer->damageMonitor(pActiveMonitor);
+    }
+
+    return {};
 }
 
 SDispatchResult handlePartitions(std::string args) {
@@ -321,6 +460,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     // Register our custom dispatchers
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:partitions", handlePartitions);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:togglecenter", handleToggleCenter);
+    HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:togglezen", handleToggleZen);
 
     // Register event listeners for debug logging
     activeWindowListener = Event::bus()->m_events.window.active.listen([](PHLWINDOW w, auto reason) {
@@ -409,6 +549,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     logState("PLUGIN_EXIT called");
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus:partitions");
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus:togglecenter");
+    HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus:togglezen");
 
     activeWindowListener.reset();
     activeWorkspaceListener.reset();
