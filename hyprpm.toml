@@ -1,0 +1,11 @@
+[repository]
+name = "hyprscrolling-plus"
+authors = ["Antigravity"]
+
+[hyprscrolling-plus]
+description = "Grid partitions and centering patches for scrolling layout"
+authors = ["Antigravity"]
+output = "hyprscrolling-plus.so"
+build = [
+    "make all"
+]

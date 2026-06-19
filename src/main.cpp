@@ -1,0 +1,249 @@
+#include <vector>
+#include <algorithm>
+#include <string>
+#include <sstream>
+#include <iomanip>
+#include <any>
+#include <chrono>
+#include <memory>
+#include <map>
+#include <set>
+#include <list>
+#include <deque>
+#include <array>
+#include <optional>
+#include <unordered_map>
+#include <unordered_set>
+#include <mutex>
+#include <thread>
+#include <functional>
+#include <variant>
+
+#define private public
+#include <hyprland/src/Compositor.hpp>
+#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/helpers/Monitor.hpp>
+#include <hyprland/src/plugins/PluginAPI.hpp>
+#undef private
+
+
+inline HANDLE PHANDLE = nullptr;
+
+APICALL EXPORT std::string PLUGIN_API_VERSION() {
+    return HYPRLAND_API_VERSION;
+}
+
+// Helper to get hex address string of a window
+std::string getAddressStr(PHLWINDOW pWindow) {
+    if (!pWindow) return "";
+    std::stringstream ss;
+    ss << "0x" << std::hex << (uint64_t)pWindow.get();
+    return ss.str();
+}
+
+SDispatchResult handlePartitions(std::string args) {
+    int partitions = 2;
+    try {
+        partitions = std::stoi(args);
+    } catch (...) {
+        partitions = 2;
+    }
+
+    double width = 1.0;
+    if (partitions > 1) {
+        width = (1.0 / partitions) + 0.0001;
+    }
+    
+    // Format width with 6 decimal places
+    std::stringstream ss;
+    ss << std::fixed << std::setprecision(6) << width;
+    std::string width_str = ss.str();
+
+    // Get current active workspace
+    PHLMONITOR pActiveMonitor = g_pCompositor->getMonitorFromCursor();
+    if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) {
+        return {false, false, "No active workspace found"};
+    }
+    WORKSPACEID ws_id = pActiveMonitor->m_activeWorkspace->m_id;
+
+    // Get all windows on the active workspace and sort them left-to-right
+    std::vector<PHLWINDOW> ws_windows;
+    for (auto const& w : g_pCompositor->m_windows) {
+        if (w && w->m_workspace && w->m_workspace->m_id == ws_id && !w->isHidden() && w->m_isMapped && !w->m_isFloating) {
+            ws_windows.push_back(w);
+        }
+    }
+    
+    if (ws_windows.empty()) {
+        return {};
+    }
+
+    std::sort(ws_windows.begin(), ws_windows.end(), [](const PHLWINDOW& a, const PHLWINDOW& b) {
+        return a->m_position.x < b->m_position.x;
+    });
+
+    PHLWINDOW pOriginalActive = nullptr;
+    for (auto const& w : ws_windows) {
+        if (g_pCompositor->isWindowActive(w)) {
+            pOriginalActive = w;
+            break;
+        }
+    }
+
+    // Store original states to restore later
+    std::string orig_animations = HyprlandAPI::invokeHyprctlCommand("getoption", "animations:enabled");
+    bool animations_enabled = orig_animations.find("int: 1") != std::string::npos;
+
+    std::string orig_fit = HyprlandAPI::invokeHyprctlCommand("getoption", "scrolling:focus_fit_method");
+    std::string final_fit_method = "1";
+    if (partitions > 1) {
+        final_fit_method = (orig_fit.find("int: 0") != std::string::npos) ? "0" : "1";
+    }
+
+    // Set configuration values dynamically
+    HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled 0");
+    HyprlandAPI::invokeHyprctlCommand("keyword", "scrolling:focus_fit_method 0");
+    HyprlandAPI::invokeHyprctlCommand("keyword", "scrolling:column_width " + width_str);
+
+    // Apply resizing sequentially to every window
+    for (auto const& w : ws_windows) {
+        std::string addrStr = getAddressStr(w);
+        HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + addrStr);
+        HyprlandAPI::invokeHyprctlCommand("dispatch", "layoutmsg colresize " + width_str);
+    }
+
+    // Restore original active focus
+    if (pOriginalActive) {
+        std::string origAddrStr = getAddressStr(pOriginalActive);
+        HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + origAddrStr);
+    }
+
+    // Restore settings
+    HyprlandAPI::invokeHyprctlCommand("keyword", "scrolling:focus_fit_method " + final_fit_method);
+    HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled " + std::to_string(animations_enabled ? 1 : 0));
+
+    return {};
+}
+
+SDispatchResult handleToggleCenter(std::string) {
+    // Read current focus fit method
+    std::string option_info = HyprlandAPI::invokeHyprctlCommand("getoption", "scrolling:focus_fit_method");
+    bool is_centered = option_info.find("int: 0") != std::string::npos;
+    std::string new_fit = is_centered ? "1" : "0";
+
+    // Get active workspace ID
+    PHLMONITOR pActiveMonitor = g_pCompositor->getMonitorFromCursor();
+    if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) {
+        return {false, false, "No active workspace found"};
+    }
+    WORKSPACEID ws_id = pActiveMonitor->m_activeWorkspace->m_id;
+
+    // Get windows on the active workspace and sort them left-to-right
+    std::vector<PHLWINDOW> ws_windows;
+    for (auto const& w : g_pCompositor->m_windows) {
+        if (w && w->m_workspace && w->m_workspace->m_id == ws_id && !w->isHidden() && w->m_isMapped && !w->m_isFloating) {
+            ws_windows.push_back(w);
+        }
+    }
+    
+    if (ws_windows.empty()) {
+        return {};
+    }
+
+    std::sort(ws_windows.begin(), ws_windows.end(), [](const PHLWINDOW& a, const PHLWINDOW& b) {
+        return a->m_position.x < b->m_position.x;
+    });
+
+    PHLWINDOW pActiveWindow = nullptr;
+    int active_idx = 0;
+    std::string active_addr = "";
+    for (size_t i = 0; i < ws_windows.size(); ++i) {
+        if (g_pCompositor->isWindowActive(ws_windows[i])) {
+            pActiveWindow = ws_windows[i];
+            active_idx = i;
+            active_addr = getAddressStr(pActiveWindow);
+            break;
+        }
+    }
+
+    // Read column width
+    std::string width_info = HyprlandAPI::invokeHyprctlCommand("getoption", "scrolling:column_width");
+    double col_width = 0.5;
+    size_t float_pos = width_info.find("float: ");
+    if (float_pos != std::string::npos) {
+        try {
+            col_width = std::stod(width_info.substr(float_pos + 7));
+        } catch (...) {}
+    }
+    int P = std::max(1, (int)std::round(1.0 / col_width));
+
+    std::string orig_animations = HyprlandAPI::invokeHyprctlCommand("getoption", "animations:enabled");
+    bool animations_enabled = orig_animations.find("int: 1") != std::string::npos;
+
+    // Apply focus fit method
+    HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled 0");
+    HyprlandAPI::invokeHyprctlCommand("keyword", "scrolling:focus_fit_method " + new_fit);
+
+    if (new_fit == "1") {
+        // Toggle OFF (fit mode): Scroll away to break centered state, then align
+        int away_idx = 0;
+        if (active_idx < P) {
+            away_idx = (int)ws_windows.size() - 1;
+        }
+        
+        std::string away_addr = getAddressStr(ws_windows[away_idx]);
+        HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + away_addr);
+
+        int start_idx = (active_idx / P) * P;
+        if (start_idx < (int)ws_windows.size()) {
+            std::string start_addr = getAddressStr(ws_windows[start_idx]);
+            HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + start_addr);
+        }
+
+        if (!active_addr.empty()) {
+            HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + active_addr);
+        }
+    } else {
+        // Toggle ON (center mode): Jitter focus change to center active window
+        int jitter_idx = (active_idx == 0 && ws_windows.size() > 1) ? 1 : 0;
+        std::string jitter_addr = getAddressStr(ws_windows[jitter_idx]);
+        HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + jitter_addr);
+        
+        if (!active_addr.empty()) {
+            HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + active_addr);
+        }
+    }
+
+    // Restore animations
+    HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled " + std::to_string(animations_enabled ? 1 : 0));
+
+    return {};
+}
+
+APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
+    PHANDLE = handle;
+
+    const std::string COMPOSITOR_HASH = __hyprland_api_get_hash();
+    const std::string CLIENT_HASH = __hyprland_api_get_client_hash();
+
+    if (COMPOSITOR_HASH != CLIENT_HASH) {
+        HyprlandAPI::addNotification(PHANDLE, "[hyprscrolling-plus] Mismatched headers! Can't proceed.",
+                                     CHyprColor{1.0, 0.2, 0.2, 1.0}, 5000);
+        throw std::runtime_error("[hyprscrolling-plus] Version mismatch");
+    }
+
+    // Register our custom dispatchers
+    HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:partitions", handlePartitions);
+    HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:togglecenter", handleToggleCenter);
+
+    HyprlandAPI::addNotification(PHANDLE, "[hyprscrolling-plus] Loaded successfully!",
+                                 CHyprColor{0.2, 1.0, 0.2, 1.0}, 5000);
+
+    return {"hyprscrolling-plus", "Grid partitions and centering patches for scrolling layout", "Antigravity", "1.0"};
+}
+
+APICALL EXPORT void PLUGIN_EXIT() {
+    HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus:partitions");
+    HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus:togglecenter");
+}
