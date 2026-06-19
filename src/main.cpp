@@ -303,7 +303,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         logState("Window fullscreen state changed on " + getAddressStr(w));
         
         if (w && !w->isFullscreen() && w->m_workspace) {
-            // Defer the focus jitter to the next idle cycle using doLater
+            // Defer the first focus change to the next idle cycle
             g_pEventLoopManager->doLater([w]() {
                 if (!w || w->isHidden() || !w->m_isMapped) return;
 
@@ -332,12 +332,17 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
                         HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled 0");
 
-                        // Jitter focus to trigger layout centering recalculation
+                        // Focus the other window in this tick to force a layout resize
                         HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + getAddressStr(pOther));
-                        HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + getAddressStr(w));
 
-                        // Restore animations
-                        HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled " + std::to_string(animations_enabled ? 1 : 0));
+                        // Defer focusing back to w to the NEXT idle cycle
+                        g_pEventLoopManager->doLater([w, animations_enabled]() {
+                            if (w && !w->isHidden() && w->m_isMapped) {
+                                HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + getAddressStr(w));
+                            }
+                            // Restore animations
+                            HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled " + std::to_string(animations_enabled ? 1 : 0));
+                        });
                     }
                 }
             });
