@@ -28,6 +28,9 @@
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
+#include <hyprland/src/config/ConfigManager.hpp>
+#include <hyprland/src/desktop/state/FocusState.hpp>
+#include <hyprland/src/layout/LayoutManager.hpp>
 #undef private
 
 
@@ -150,33 +153,62 @@ SDispatchResult handlePartitions(std::string args) {
     }
 
     // Store original states to restore later
-    std::string orig_animations = HyprlandAPI::invokeHyprctlCommand("getoption", "animations:enabled");
-    bool animations_enabled = orig_animations.find("int: 1") != std::string::npos;
+    bool animations_enabled = true;
+    {
+        auto reply = Config::mgr()->getConfigValue("animations:enabled");
+        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
+            animations_enabled = *(int*)(*reply.dataptr) != 0;
+        }
+    }
 
-    std::string orig_fit = HyprlandAPI::invokeHyprctlCommand("getoption", "scrolling:focus_fit_method");
-    std::string final_fit_method = "1";
+    int orig_fit = 1;
+    {
+        auto reply = Config::mgr()->getConfigValue("scrolling:focus_fit_method");
+        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
+            orig_fit = *(int*)(*reply.dataptr);
+        }
+    }
+
+    int final_fit_method = 1;
     if (partitions > 1) {
-        final_fit_method = (orig_fit.find("int: 0") != std::string::npos) ? "0" : "1";
+        final_fit_method = (orig_fit == 0) ? 0 : 1;
     }
 
     // Set configuration values dynamically
-    HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled 0");
-    HyprlandAPI::invokeHyprctlCommand("keyword", "scrolling:focus_fit_method " + final_fit_method);
-    HyprlandAPI::invokeHyprctlCommand("keyword", "scrolling:column_width " + width_str);
+    {
+        auto reply = Config::mgr()->getConfigValue("animations:enabled");
+        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
+            *(int*)(*reply.dataptr) = 0;
+        }
+    }
+    {
+        auto reply = Config::mgr()->getConfigValue("scrolling:focus_fit_method");
+        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
+            *(int*)(*reply.dataptr) = final_fit_method;
+        }
+    }
+    {
+        auto reply = Config::mgr()->getConfigValue("scrolling:column_width");
+        if (reply.dataptr && reply.type) {
+            if (*reply.type == typeid(float)) {
+                *(float*)(*reply.dataptr) = (float)width;
+            } else if (*reply.type == typeid(double)) {
+                *(double*)(*reply.dataptr) = width;
+            }
+        }
+    }
 
     // Apply resizing sequentially to every window
     for (auto const& w : ws_windows) {
-        std::string addrStr = getAddressStr(w);
-        HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + addrStr);
-        HyprlandAPI::invokeHyprctlCommand("dispatch", "layoutmsg colresize " + width_str);
+        Desktop::focusState()->fullWindowFocus(w, Desktop::FOCUS_REASON_OTHER);
+        g_layoutManager->layoutMsg("colresize " + width_str);
     }
 
     // Restore original active focus / alignment
     if (pOriginalActive) {
-        if (final_fit_method == "1") {
-            // Find active index and original address
+        if (final_fit_method == 1) {
+            // Find active index
             int active_idx = 0;
-            std::string active_addr = getAddressStr(pOriginalActive);
             for (size_t i = 0; i < ws_windows.size(); ++i) {
                 if (ws_windows[i] == pOriginalActive) {
                     active_idx = i;
@@ -184,33 +216,38 @@ SDispatchResult handlePartitions(std::string args) {
                 }
             }
 
-            int P = partitions;
+            int P = std::max(1, partitions);
             int away_idx = 0;
             if (active_idx < P) {
                 away_idx = (int)ws_windows.size() - 1;
             }
             
-            std::string away_addr = getAddressStr(ws_windows[away_idx]);
-            HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + away_addr);
+            Desktop::focusState()->fullWindowFocus(ws_windows[away_idx], Desktop::FOCUS_REASON_OTHER);
 
             int start_idx = (active_idx / P) * P;
             if (start_idx < (int)ws_windows.size()) {
-                std::string start_addr = getAddressStr(ws_windows[start_idx]);
-                HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + start_addr);
+                Desktop::focusState()->fullWindowFocus(ws_windows[start_idx], Desktop::FOCUS_REASON_OTHER);
             }
 
-            if (!active_addr.empty()) {
-                HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + active_addr);
-            }
+            Desktop::focusState()->fullWindowFocus(pOriginalActive, Desktop::FOCUS_REASON_OTHER);
         } else {
-            std::string origAddrStr = getAddressStr(pOriginalActive);
-            HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + origAddrStr);
+            Desktop::focusState()->fullWindowFocus(pOriginalActive, Desktop::FOCUS_REASON_OTHER);
         }
     }
 
     // Restore settings
-    HyprlandAPI::invokeHyprctlCommand("keyword", "scrolling:focus_fit_method " + final_fit_method);
-    HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled " + std::to_string(animations_enabled ? 1 : 0));
+    {
+        auto reply = Config::mgr()->getConfigValue("scrolling:focus_fit_method");
+        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
+            *(int*)(*reply.dataptr) = final_fit_method;
+        }
+    }
+    {
+        auto reply = Config::mgr()->getConfigValue("animations:enabled");
+        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
+            *(int*)(*reply.dataptr) = animations_enabled ? 1 : 0;
+        }
+    }
 
     return {};
 }
@@ -218,9 +255,14 @@ SDispatchResult handlePartitions(std::string args) {
 SDispatchResult handleToggleCenter(std::string) {
     logState("Dispatcher: togglecenter");
     // Read current focus fit method
-    std::string option_info = HyprlandAPI::invokeHyprctlCommand("getoption", "scrolling:focus_fit_method");
-    bool is_centered = option_info.find("int: 0") != std::string::npos;
-    std::string new_fit = is_centered ? "1" : "0";
+    int current_fit = 1;
+    {
+        auto reply = Config::mgr()->getConfigValue("scrolling:focus_fit_method");
+        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
+            current_fit = *(int*)(*reply.dataptr);
+        }
+    }
+    int new_fit = (current_fit == 0) ? 1 : 0;
 
     // Get active workspace ID
     PHLMONITOR pActiveMonitor = g_pCompositor->getMonitorFromCursor();
@@ -247,66 +289,84 @@ SDispatchResult handleToggleCenter(std::string) {
 
     PHLWINDOW pActiveWindow = nullptr;
     int active_idx = 0;
-    std::string active_addr = "";
     for (size_t i = 0; i < ws_windows.size(); ++i) {
         if (g_pCompositor->isWindowActive(ws_windows[i])) {
             pActiveWindow = ws_windows[i];
             active_idx = i;
-            active_addr = getAddressStr(pActiveWindow);
             break;
         }
     }
 
     // Read column width
-    std::string width_info = HyprlandAPI::invokeHyprctlCommand("getoption", "scrolling:column_width");
     double col_width = 0.5;
-    size_t float_pos = width_info.find("float: ");
-    if (float_pos != std::string::npos) {
-        try {
-            col_width = std::stod(width_info.substr(float_pos + 7));
-        } catch (...) {}
+    {
+        auto reply = Config::mgr()->getConfigValue("scrolling:column_width");
+        if (reply.dataptr && reply.type) {
+            if (*reply.type == typeid(float)) {
+                col_width = *(float*)(*reply.dataptr);
+            } else if (*reply.type == typeid(double)) {
+                col_width = *(double*)(*reply.dataptr);
+            }
+        }
     }
     int P = std::max(1, (int)std::round(1.0 / col_width));
 
-    std::string orig_animations = HyprlandAPI::invokeHyprctlCommand("getoption", "animations:enabled");
-    bool animations_enabled = orig_animations.find("int: 1") != std::string::npos;
+    bool animations_enabled = true;
+    {
+        auto reply = Config::mgr()->getConfigValue("animations:enabled");
+        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
+            animations_enabled = *(int*)(*reply.dataptr) != 0;
+        }
+    }
 
     // Apply focus fit method
-    HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled 0");
-    HyprlandAPI::invokeHyprctlCommand("keyword", "scrolling:focus_fit_method " + new_fit);
+    {
+        auto reply = Config::mgr()->getConfigValue("animations:enabled");
+        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
+            *(int*)(*reply.dataptr) = 0;
+        }
+    }
+    {
+        auto reply = Config::mgr()->getConfigValue("scrolling:focus_fit_method");
+        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
+            *(int*)(*reply.dataptr) = new_fit;
+        }
+    }
 
-    if (new_fit == "1") {
+    if (new_fit == 1) {
         // Toggle OFF (fit mode): Scroll away to break centered state, then align
         int away_idx = 0;
         if (active_idx < P) {
             away_idx = (int)ws_windows.size() - 1;
         }
         
-        std::string away_addr = getAddressStr(ws_windows[away_idx]);
-        HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + away_addr);
+        Desktop::focusState()->fullWindowFocus(ws_windows[away_idx], Desktop::FOCUS_REASON_OTHER);
 
         int start_idx = (active_idx / P) * P;
         if (start_idx < (int)ws_windows.size()) {
-            std::string start_addr = getAddressStr(ws_windows[start_idx]);
-            HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + start_addr);
+            Desktop::focusState()->fullWindowFocus(ws_windows[start_idx], Desktop::FOCUS_REASON_OTHER);
         }
 
-        if (!active_addr.empty()) {
-            HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + active_addr);
+        if (pActiveWindow) {
+            Desktop::focusState()->fullWindowFocus(pActiveWindow, Desktop::FOCUS_REASON_OTHER);
         }
     } else {
         // Toggle ON (center mode): Jitter focus change to center active window
         int jitter_idx = (active_idx == 0 && ws_windows.size() > 1) ? 1 : 0;
-        std::string jitter_addr = getAddressStr(ws_windows[jitter_idx]);
-        HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + jitter_addr);
+        Desktop::focusState()->fullWindowFocus(ws_windows[jitter_idx], Desktop::FOCUS_REASON_OTHER);
         
-        if (!active_addr.empty()) {
-            HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + active_addr);
+        if (pActiveWindow) {
+            Desktop::focusState()->fullWindowFocus(pActiveWindow, Desktop::FOCUS_REASON_OTHER);
         }
     }
 
     // Restore animations
-    HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled " + std::to_string(animations_enabled ? 1 : 0));
+    {
+        auto reply = Config::mgr()->getConfigValue("animations:enabled");
+        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
+            *(int*)(*reply.dataptr) = animations_enabled ? 1 : 0;
+        }
+    }
 
     return {};
 }
@@ -389,21 +449,34 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
                     if (pOther) {
                         // Temporarily disable animations for a seamless layout refresh
-                        std::string orig_animations = HyprlandAPI::invokeHyprctlCommand("getoption", "animations:enabled");
-                        bool animations_enabled = orig_animations.find("int: 1") != std::string::npos;
+                        bool animations_enabled = true;
+                        {
+                            auto reply = Config::mgr()->getConfigValue("animations:enabled");
+                            if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
+                                animations_enabled = *(int*)(*reply.dataptr) != 0;
+                            }
+                        }
 
-                        HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled 0");
+                        {
+                            auto reply = Config::mgr()->getConfigValue("animations:enabled");
+                            if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
+                                *(int*)(*reply.dataptr) = 0;
+                            }
+                        }
 
                         // Focus the other window in this tick to force a layout resize
-                        HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + getAddressStr(pOther));
+                        Desktop::focusState()->fullWindowFocus(pOther, Desktop::FOCUS_REASON_OTHER);
 
                         // Defer focusing back to w to the NEXT idle cycle
                         g_pEventLoopManager->doLater([w, animations_enabled]() {
                             if (w && !w->isHidden() && w->m_isMapped) {
-                                HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + getAddressStr(w));
+                                Desktop::focusState()->fullWindowFocus(w, Desktop::FOCUS_REASON_OTHER);
                             }
                             // Restore animations
-                            HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled " + std::to_string(animations_enabled ? 1 : 0));
+                            auto reply = Config::mgr()->getConfigValue("animations:enabled");
+                            if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
+                                *(int*)(*reply.dataptr) = animations_enabled ? 1 : 0;
+                            }
                         });
                     }
                 }

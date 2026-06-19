@@ -1,4 +1,4 @@
-CXXFLAGS = -std=c++23 -O2 -fPIC -shared -fno-gnu-unique -Wall -Wextra
+CXXFLAGS = -std=c++23 -g -O2 -fPIC -shared -fno-gnu-unique -Wall -Wextra
 HYPRLAND_CFLAGS = $(shell pkg-config --cflags hyprland)
 
 OUT = hyprscrolling-plus.so
