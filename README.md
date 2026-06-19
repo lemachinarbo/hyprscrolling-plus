@@ -6,6 +6,12 @@ It enables precise viewport partitioning (e.g., 2w, 3w layouts) and robust activ
 
 ## Features
 
+
+
+https://github.com/user-attachments/assets/8e94c795-f587-4339-aa77-8e89c87dbb40
+
+
+
 - **Grid Partitions**: Split the infinite scrolling tape into precise fractional columns relative to your viewport (e.g., 1, 2, 3, or 4 columns).
 - **Centering Toggles**: Quickly snap the active window/column to the horizontal center of the screen, which dynamically adjusts and remains locked even after toggling fullscreen/maximize state off.
 - **Native Zen Mode**: Dim inactive windows and focus entirely on the active centered column with a single shortcut.
