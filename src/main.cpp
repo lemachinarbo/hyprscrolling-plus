@@ -332,71 +332,39 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         logState("Window fullscreen state changed on " + getAddressStr(w));
         
         if (w && !w->isFullscreen() && w->m_workspace) {
-            // Defer the first focus change to the next idle cycle
+            // Defer the first focus change to the next idle cycle to let Hyprland complete the fullscreen transition
             g_pEventLoopManager->doLater([w]() {
                 if (!w || w->isHidden() || !w->m_isMapped) return;
 
-                // Find all windows on this workspace to see if we need to refocus
-                std::vector<PHLWINDOW> ws_windows;
-                for (auto const& win : g_pCompositor->m_windows) {
-                    if (win && win->m_workspace && win->m_workspace->m_id == w->m_workspace->m_id && !win->isHidden() && win->m_isMapped && !win->m_isFloating) {
-                        ws_windows.push_back(win);
+                // Try to get CScrollingAlgorithm
+                PHLMONITOR pActiveMonitor = g_pCompositor->getMonitorFromCursor();
+                if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) {
+                    return;
+                }
+
+                if (!pActiveMonitor->m_activeWorkspace->m_space || !pActiveMonitor->m_activeWorkspace->m_space->algorithm()) {
+                    return;
+                }
+
+                auto pTiled = pActiveMonitor->m_activeWorkspace->m_space->algorithm()->tiledAlgo().get();
+                Layout::Tiled::CScrollingAlgorithm* pScrolling = dynamic_cast<Layout::Tiled::CScrollingAlgorithm*>(pTiled);
+                if (!pScrolling) {
+                    return;
+                }
+
+                SP<Layout::ITarget> pTarget = getTargetForWindow(w);
+                if (pTarget) {
+                    auto pTargetData = pScrolling->dataFor(pTarget);
+                    if (pTargetData && pTargetData->column) {
+                        auto pColumn = pTargetData->column.lock();
+                        if (pColumn) {
+                            int64_t current_fit = getConfigValueInt("scrolling:focus_fit_method", 1);
+                            alignActiveColumn(pScrolling, pColumn, current_fit);
+                        }
                     }
                 }
 
-                if (ws_windows.size() > 1) {
-                    // Sort left-to-right to find physical adjacencies
-                    std::sort(ws_windows.begin(), ws_windows.end(), [](const PHLWINDOW& a, const PHLWINDOW& b) {
-                        return a->m_position.x < b->m_position.x;
-                    });
-
-                    // Find the index of the fullscreen window w in the sorted list
-                    int w_idx = -1;
-                    for (size_t i = 0; i < ws_windows.size(); ++i) {
-                        if (ws_windows[i] == w) {
-                            w_idx = i;
-                            break;
-                        }
-                    }
-
-                    PHLWINDOW pOther = nullptr;
-                    if (w_idx != -1) {
-                        if (w_idx > 0) {
-                            pOther = ws_windows[w_idx - 1];
-                        } else if (w_idx < (int)ws_windows.size() - 1) {
-                            pOther = ws_windows[w_idx + 1];
-                        }
-                    }
-
-                    // Fallback to first non-self window if index was not found
-                    if (!pOther) {
-                        for (auto const& win : ws_windows) {
-                            if (win != w) {
-                                pOther = win;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (pOther) {
-                        // Temporarily disable animations for a seamless layout refresh
-                        bool animations_enabled = getConfigValueInt("animations:enabled", 1) != 0;
-
-                        setConfigValueInt("animations:enabled", 0);
-
-                        // Focus the other window in this tick to force a layout resize
-                        Desktop::focusState()->fullWindowFocus(pOther, Desktop::FOCUS_REASON_OTHER);
-
-                        // Defer focusing back to w to the NEXT idle cycle
-                        g_pEventLoopManager->doLater([w, animations_enabled]() {
-                            if (w && !w->isHidden() && w->m_isMapped) {
-                                Desktop::focusState()->fullWindowFocus(w, Desktop::FOCUS_REASON_OTHER);
-                            }
-                            // Restore animations
-                            setConfigValueInt("animations:enabled", animations_enabled ? 1 : 0);
-                        });
-                    }
-                }
+                g_layoutManager->recalculateMonitor(pActiveMonitor);
             });
         }
     });
