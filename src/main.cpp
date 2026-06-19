@@ -300,6 +300,42 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     Event::bus()->m_events.window.fullscreen.listenStatic([](PHLWINDOW w) {
         logState("Window fullscreen state changed on " + getAddressStr(w) + " (" + (w ? w->m_class : "none") + ")");
+        
+        if (w && !w->isFullscreen() && w->m_workspace) {
+            // Find all windows on this workspace to see if we need to refocus
+            std::vector<PHLWINDOW> ws_windows;
+            for (auto const& win : g_pCompositor->m_windows) {
+                if (win && win->m_workspace && win->m_workspace->m_id == w->m_workspace->m_id && !win->isHidden() && win->m_isMapped && !win->m_isFloating) {
+                    ws_windows.push_back(win);
+                }
+            }
+
+            if (ws_windows.size() > 1) {
+                // Find another window on the workspace to shift focus to briefly
+                PHLWINDOW pOther = nullptr;
+                for (auto const& win : ws_windows) {
+                    if (win != w) {
+                        pOther = win;
+                        break;
+                    }
+                }
+
+                if (pOther) {
+                    // Temporarily disable animations for a seamless layout refresh
+                    std::string orig_animations = HyprlandAPI::invokeHyprctlCommand("getoption", "animations:enabled");
+                    bool animations_enabled = orig_animations.find("int: 1") != std::string::npos;
+
+                    HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled 0");
+
+                    // Jitter focus to trigger layout centering recalculation
+                    HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + getAddressStr(pOther));
+                    HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + getAddressStr(w));
+
+                    // Restore animations
+                    HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled " + std::to_string(animations_enabled ? 1 : 0));
+                }
+            }
+        }
     });
 
     Event::bus()->m_events.window.open.listenStatic([](PHLWINDOW w) {
