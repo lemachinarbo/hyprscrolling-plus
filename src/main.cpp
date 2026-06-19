@@ -171,10 +171,41 @@ SDispatchResult handlePartitions(std::string args) {
         HyprlandAPI::invokeHyprctlCommand("dispatch", "layoutmsg colresize " + width_str);
     }
 
-    // Restore original active focus
+    // Restore original active focus / alignment
     if (pOriginalActive) {
-        std::string origAddrStr = getAddressStr(pOriginalActive);
-        HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + origAddrStr);
+        if (final_fit_method == "1") {
+            // Find active index and original address
+            int active_idx = 0;
+            std::string active_addr = getAddressStr(pOriginalActive);
+            for (size_t i = 0; i < ws_windows.size(); ++i) {
+                if (ws_windows[i] == pOriginalActive) {
+                    active_idx = i;
+                    break;
+                }
+            }
+
+            int P = partitions;
+            int away_idx = 0;
+            if (active_idx < P) {
+                away_idx = (int)ws_windows.size() - 1;
+            }
+            
+            std::string away_addr = getAddressStr(ws_windows[away_idx]);
+            HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + away_addr);
+
+            int start_idx = (active_idx / P) * P;
+            if (start_idx < (int)ws_windows.size()) {
+                std::string start_addr = getAddressStr(ws_windows[start_idx]);
+                HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + start_addr);
+            }
+
+            if (!active_addr.empty()) {
+                HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + active_addr);
+            }
+        } else {
+            std::string origAddrStr = getAddressStr(pOriginalActive);
+            HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + origAddrStr);
+        }
     }
 
     // Restore settings
