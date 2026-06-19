@@ -33,6 +33,12 @@
 
 inline HANDLE PHANDLE = nullptr;
 
+inline Hyprutils::Signal::CHyprSignalListener activeWindowListener;
+inline Hyprutils::Signal::CHyprSignalListener activeWorkspaceListener;
+inline Hyprutils::Signal::CHyprSignalListener fullscreenListener;
+inline Hyprutils::Signal::CHyprSignalListener windowOpenListener;
+inline Hyprutils::Signal::CHyprSignalListener windowCloseListener;
+
 APICALL EXPORT std::string PLUGIN_API_VERSION() {
     return HYPRLAND_API_VERSION;
 }
@@ -291,15 +297,15 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:togglecenter", handleToggleCenter);
 
     // Register event listeners for debug logging
-    Event::bus()->m_events.window.active.listenStatic([](PHLWINDOW w, auto reason) {
+    activeWindowListener = Event::bus()->m_events.window.active.listen([](PHLWINDOW w, auto reason) {
         logState("Focus changed to " + getAddressStr(w));
     });
 
-    Event::bus()->m_events.workspace.active.listenStatic([](PHLWORKSPACE ws) {
+    activeWorkspaceListener = Event::bus()->m_events.workspace.active.listen([](PHLWORKSPACE ws) {
         logState("Workspace changed to workspace " + std::to_string(ws ? ws->m_id : -1));
     });
 
-    Event::bus()->m_events.window.fullscreen.listenStatic([](PHLWINDOW w) {
+    fullscreenListener = Event::bus()->m_events.window.fullscreen.listen([](PHLWINDOW w) {
         logState("Window fullscreen state changed on " + getAddressStr(w));
         
         if (w && !w->isFullscreen() && w->m_workspace) {
@@ -373,11 +379,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         }
     });
 
-    Event::bus()->m_events.window.open.listenStatic([](PHLWINDOW w) {
+    windowOpenListener = Event::bus()->m_events.window.open.listen([](PHLWINDOW w) {
         logState("Window opened: " + getAddressStr(w));
     });
 
-    Event::bus()->m_events.window.close.listenStatic([](PHLWINDOW w) {
+    windowCloseListener = Event::bus()->m_events.window.close.listen([](PHLWINDOW w) {
         logState("Window closed: " + getAddressStr(w));
     });
 
@@ -390,4 +396,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 APICALL EXPORT void PLUGIN_EXIT() {
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus:partitions");
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus:togglecenter");
+
+    activeWindowListener.reset();
+    activeWorkspaceListener.reset();
+    fullscreenListener.reset();
+    windowOpenListener.reset();
+    windowCloseListener.reset();
 }
