@@ -18,6 +18,7 @@
 #include <thread>
 #include <functional>
 #include <variant>
+#include <fstream>
 
 #define private public
 #include <hyprland/src/Compositor.hpp>
@@ -25,6 +26,7 @@
 #include <hyprland/src/desktop/Workspace.hpp>
 #include <hyprland/src/helpers/Monitor.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
+#include <hyprland/src/event/EventBus.hpp>
 #undef private
 
 
@@ -42,7 +44,56 @@ std::string getAddressStr(PHLWINDOW pWindow) {
     return ss.str();
 }
 
+std::string getTimestamp() {
+    auto now = std::chrono::system_clock::now();
+    auto in_time_t = std::chrono::system_clock::to_time_t(now);
+    std::stringstream ss;
+    ss << std::put_time(std::localtime(&in_time_t), "%Y-%m-%d %H:%M:%S");
+    return ss.str();
+}
+
+void logState(const std::string& action) {
+    std::ofstream logFile("/tmp/hyprscrolling-plus.log", std::ios::app);
+    if (!logFile.is_open()) return;
+
+    logFile << "[" << getTimestamp() << "] ACTION: " << action << "\n";
+
+    PHLMONITOR pActiveMonitor = g_pCompositor->getMonitorFromCursor();
+    if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) {
+        logFile << "  No active workspace\n\n";
+        return;
+    }
+    WORKSPACEID ws_id = pActiveMonitor->m_activeWorkspace->m_id;
+    logFile << "  Active Workspace: " << ws_id << "\n";
+
+    std::vector<PHLWINDOW> ws_windows;
+    for (auto const& w : g_pCompositor->m_windows) {
+        if (w && w->m_workspace && w->m_workspace->m_id == ws_id && !w->isHidden() && w->m_isMapped && !w->m_isFloating) {
+            ws_windows.push_back(w);
+        }
+    }
+
+    std::sort(ws_windows.begin(), ws_windows.end(), [](const PHLWINDOW& a, const PHLWINDOW& b) {
+        return a->m_position.x < b->m_position.x;
+    });
+
+    logFile << "  Windows (sorted left-to-right):\n";
+    for (size_t i = 0; i < ws_windows.size(); ++i) {
+        auto w = ws_windows[i];
+        bool active = g_pCompositor->isWindowActive(w);
+        logFile << "    - Window " << i << " | " << getAddressStr(w)
+                << " | class: " << w->m_class
+                << " | title: " << w->m_title << "\n"
+                << "      pos: (" << (int)w->m_position.x << ", " << (int)w->m_position.y << ")"
+                << " | size: (" << (int)w->m_size.x << ", " << (int)w->m_size.y << ")"
+                << (active ? " [FOCUSED]" : "")
+                << "\n";
+    }
+    logFile << "\n";
+}
+
 SDispatchResult handlePartitions(std::string args) {
+    logState("Dispatcher: partitions " + args);
     int partitions = 2;
     try {
         partitions = std::stoi(args);
@@ -127,6 +178,7 @@ SDispatchResult handlePartitions(std::string args) {
 }
 
 SDispatchResult handleToggleCenter(std::string) {
+    logState("Dispatcher: togglecenter");
     // Read current focus fit method
     std::string option_info = HyprlandAPI::invokeHyprctlCommand("getoption", "scrolling:focus_fit_method");
     bool is_centered = option_info.find("int: 0") != std::string::npos;
@@ -236,6 +288,27 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     // Register our custom dispatchers
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:partitions", handlePartitions);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:togglecenter", handleToggleCenter);
+
+    // Register event listeners for debug logging
+    Event::bus()->m_events.window.active.listenStatic([](PHLWINDOW w, auto reason) {
+        logState("Focus changed to " + getAddressStr(w) + " (" + (w ? w->m_class : "none") + ")");
+    });
+
+    Event::bus()->m_events.workspace.active.listenStatic([](PHLWORKSPACE ws) {
+        logState("Workspace changed to workspace " + std::to_string(ws ? ws->m_id : -1));
+    });
+
+    Event::bus()->m_events.window.fullscreen.listenStatic([](PHLWINDOW w) {
+        logState("Window fullscreen state changed on " + getAddressStr(w) + " (" + (w ? w->m_class : "none") + ")");
+    });
+
+    Event::bus()->m_events.window.open.listenStatic([](PHLWINDOW w) {
+        logState("Window opened: " + getAddressStr(w) + " (" + (w ? w->m_class : "none") + ")");
+    });
+
+    Event::bus()->m_events.window.close.listenStatic([](PHLWINDOW w) {
+        logState("Window closed: " + getAddressStr(w) + " (" + (w ? w->m_class : "none") + ")");
+    });
 
     HyprlandAPI::addNotification(PHANDLE, "[hyprscrolling-plus] Loaded successfully!",
                                  CHyprColor{0.2, 1.0, 0.2, 1.0}, 5000);
