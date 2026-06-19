@@ -36,3 +36,41 @@ When creating a PR or submission description, you MUST use Conventional Commit t
    - **Case**: The entire subject line must be lowercase.
    - **No Fluff**: No emojis, no "AI-generated" or "Verified" footers, and no trailing periods.
    - **Length**: Keep the subject line concise (under 50 characters).
+
+## Development and Testing Workflow
+
+### Rapid Local Development Loop
+When modifying the plugin source code in `src/main.cpp`:
+1. Compile the plugin locally (takes less than 2 seconds):
+   ```bash
+   make
+   ```
+2. Manually load the newly built plugin into your running Hyprland instance:
+   ```bash
+   hyprctl plugin load /home/lemachi/projects/hyprscrolling-plus/hyprscrolling-plus.so
+   ```
+3. Test your keybindings or dispatchers.
+4. To modify the code again, unload the plugin first:
+   ```bash
+   hyprctl plugin unload /home/lemachi/projects/hyprscrolling-plus/hyprscrolling-plus.so
+   ```
+
+### Persistent Registry (hyprpm)
+Once your changes are verified and committed:
+1. Re-add and build with `hyprpm`:
+   ```bash
+   hyprpm add /home/lemachi/projects/hyprscrolling-plus
+   ```
+2. Enable and reload the plugin manager:
+   ```bash
+   hyprpm enable hyprscrolling-plus
+   hyprpm reload -n
+   ```
+
+### Debugging and Logs
+- **System and Compositor Logs**: Follow the active compositor log in real-time:
+  ```bash
+  tail -f "$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/hyprland.log"
+  ```
+- **Custom Debug Log**: The plugin appends detailed action logs, window layouts, and focus changes to:
+  `/tmp/hyprscrolling-plus.log`
