@@ -27,6 +27,7 @@
 #include <hyprland/src/helpers/Monitor.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/event/EventBus.hpp>
+#include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #undef private
 
 
@@ -302,39 +303,44 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         logState("Window fullscreen state changed on " + getAddressStr(w) + " (" + (w ? w->m_class : "none") + ")");
         
         if (w && !w->isFullscreen() && w->m_workspace) {
-            // Find all windows on this workspace to see if we need to refocus
-            std::vector<PHLWINDOW> ws_windows;
-            for (auto const& win : g_pCompositor->m_windows) {
-                if (win && win->m_workspace && win->m_workspace->m_id == w->m_workspace->m_id && !win->isHidden() && win->m_isMapped && !win->m_isFloating) {
-                    ws_windows.push_back(win);
-                }
-            }
+            // Defer the focus jitter to the next idle cycle using doLater
+            g_pEventLoopManager->doLater([w]() {
+                if (!w || w->isHidden() || !w->m_isMapped) return;
 
-            if (ws_windows.size() > 1) {
-                // Find another window on the workspace to shift focus to briefly
-                PHLWINDOW pOther = nullptr;
-                for (auto const& win : ws_windows) {
-                    if (win != w) {
-                        pOther = win;
-                        break;
+                // Find all windows on this workspace to see if we need to refocus
+                std::vector<PHLWINDOW> ws_windows;
+                for (auto const& win : g_pCompositor->m_windows) {
+                    if (win && win->m_workspace && win->m_workspace->m_id == w->m_workspace->m_id && !win->isHidden() && win->m_isMapped && !win->m_isFloating) {
+                        ws_windows.push_back(win);
                     }
                 }
 
-                if (pOther) {
-                    // Temporarily disable animations for a seamless layout refresh
-                    std::string orig_animations = HyprlandAPI::invokeHyprctlCommand("getoption", "animations:enabled");
-                    bool animations_enabled = orig_animations.find("int: 1") != std::string::npos;
+                if (ws_windows.size() > 1) {
+                    // Find another window on the workspace to shift focus to briefly
+                    PHLWINDOW pOther = nullptr;
+                    for (auto const& win : ws_windows) {
+                        if (win != w) {
+                            pOther = win;
+                            break;
+                        }
+                    }
 
-                    HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled 0");
+                    if (pOther) {
+                        // Temporarily disable animations for a seamless layout refresh
+                        std::string orig_animations = HyprlandAPI::invokeHyprctlCommand("getoption", "animations:enabled");
+                        bool animations_enabled = orig_animations.find("int: 1") != std::string::npos;
 
-                    // Jitter focus to trigger layout centering recalculation
-                    HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + getAddressStr(pOther));
-                    HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + getAddressStr(w));
+                        HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled 0");
 
-                    // Restore animations
-                    HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled " + std::to_string(animations_enabled ? 1 : 0));
+                        // Jitter focus to trigger layout centering recalculation
+                        HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + getAddressStr(pOther));
+                        HyprlandAPI::invokeHyprctlCommand("dispatch", "focuswindow address:" + getAddressStr(w));
+
+                        // Restore animations
+                        HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled " + std::to_string(animations_enabled ? 1 : 0));
+                    }
                 }
-            }
+            });
         }
     });
 
