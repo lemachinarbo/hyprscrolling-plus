@@ -161,7 +161,7 @@ SDispatchResult handlePartitions(std::string args) {
 
     // Set configuration values dynamically
     HyprlandAPI::invokeHyprctlCommand("keyword", "animations:enabled 0");
-    HyprlandAPI::invokeHyprctlCommand("keyword", "scrolling:focus_fit_method 0");
+    HyprlandAPI::invokeHyprctlCommand("keyword", "scrolling:focus_fit_method " + final_fit_method);
     HyprlandAPI::invokeHyprctlCommand("keyword", "scrolling:column_width " + width_str);
 
     // Apply resizing sequentially to every window
