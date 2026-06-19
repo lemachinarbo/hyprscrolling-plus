@@ -31,6 +31,8 @@
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/layout/LayoutManager.hpp>
+#include <hyprland/src/layout/algorithm/Algorithm.hpp>
+#include <hyprland/src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.hpp>
 #undef private
 
 
@@ -60,6 +62,45 @@ std::string getTimestamp() {
     std::stringstream ss;
     ss << std::put_time(std::localtime(&in_time_t), "%Y-%m-%d %H:%M:%S");
     return ss.str();
+}
+
+static SP<Layout::ITarget> getTargetForWindow(PHLWINDOW pWindow) {
+    if (!pWindow || !pWindow->m_workspace) return nullptr;
+    auto space = pWindow->m_workspace->m_space;
+    if (!space) return nullptr;
+    for (auto const& wt : space->targets()) {
+        auto t = wt.lock();
+        if (t && t->window() == pWindow) return t;
+    }
+    return nullptr;
+}
+
+static void alignActiveColumn(Layout::Tiled::CScrollingAlgorithm* pScrolling, SP<Layout::Tiled::SColumnData> pColumn, int64_t fit_method) {
+    if (!pScrolling || !pColumn) return;
+
+    if (fit_method == 0) {
+        // Center mode: center active column
+        pScrolling->m_scrollingData->centerCol(pColumn);
+    } else {
+        // Fit mode: align to the page grid boundary
+        double col_width = 0.5;
+        auto reply = Config::mgr()->getConfigValue("scrolling:column_width");
+        if (reply.dataptr && reply.type) {
+            if (*reply.type == typeid(float)) {
+                col_width = *(float*)(*reply.dataptr);
+            } else if (*reply.type == typeid(double)) {
+                col_width = *(double*)(*reply.dataptr);
+            }
+        }
+        int P = std::max(1, (int)std::round(1.0 / col_width));
+
+        int active_idx = pScrolling->m_scrollingData->idx(pColumn);
+        int start_idx = (active_idx / P) * P;
+
+        CBox usableArea = pScrolling->usableArea();
+        double target_offset = pScrolling->m_scrollingData->controller->calculateStripStart(start_idx, usableArea);
+        pScrolling->m_scrollingData->controller->setOffset(target_offset);
+    }
 }
 
 void logState(const std::string& action) {
@@ -102,6 +143,37 @@ void logState(const std::string& action) {
     logFile << "\n";
 }
 
+static int64_t getConfigValueInt(const std::string& name, int64_t defaultValue) {
+    auto reply = Config::mgr()->getConfigValue(name);
+    if (reply.dataptr && reply.type) {
+        if (*reply.type == typeid(int)) {
+            return *(int*)(*reply.dataptr);
+        } else if (*reply.type == typeid(int64_t)) {
+            return *(int64_t*)(*reply.dataptr);
+        } else if (*reply.type == typeid(long)) {
+            return *(long*)(*reply.dataptr);
+        } else if (*reply.type == typeid(long long)) {
+            return *(long long*)(*reply.dataptr);
+        }
+    }
+    return defaultValue;
+}
+
+static void setConfigValueInt(const std::string& name, int64_t value) {
+    auto reply = Config::mgr()->getConfigValue(name);
+    if (reply.dataptr && reply.type) {
+        if (*reply.type == typeid(int)) {
+            *(int*)(*reply.dataptr) = (int)value;
+        } else if (*reply.type == typeid(int64_t)) {
+            *(int64_t*)(*reply.dataptr) = value;
+        } else if (*reply.type == typeid(long)) {
+            *(long*)(*reply.dataptr) = (long)value;
+        } else if (*reply.type == typeid(long long)) {
+            *(long long*)(*reply.dataptr) = (long long)value;
+        }
+    }
+}
+
 SDispatchResult handlePartitions(std::string args) {
     logState("Dispatcher: partitions " + args);
     int partitions = 2;
@@ -115,139 +187,61 @@ SDispatchResult handlePartitions(std::string args) {
     if (partitions > 1) {
         width = (1.0 / partitions) + 0.0001;
     }
-    
-    // Format width with 6 decimal places
-    std::stringstream ss;
-    ss << std::fixed << std::setprecision(6) << width;
-    std::string width_str = ss.str();
 
-    // Get current active workspace
+    // Get current active monitor/workspace
     PHLMONITOR pActiveMonitor = g_pCompositor->getMonitorFromCursor();
     if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) {
         return {false, false, "No active workspace found"};
     }
-    WORKSPACEID ws_id = pActiveMonitor->m_activeWorkspace->m_id;
 
-    // Get all windows on the active workspace and sort them left-to-right
-    std::vector<PHLWINDOW> ws_windows;
-    for (auto const& w : g_pCompositor->m_windows) {
-        if (w && w->m_workspace && w->m_workspace->m_id == ws_id && !w->isHidden() && w->m_isMapped && !w->m_isFloating) {
-            ws_windows.push_back(w);
-        }
-    }
-    
-    if (ws_windows.empty()) {
+    // Try to get CScrollingAlgorithm
+    if (!pActiveMonitor->m_activeWorkspace->m_space || !pActiveMonitor->m_activeWorkspace->m_space->algorithm()) {
         return {};
     }
 
-    std::sort(ws_windows.begin(), ws_windows.end(), [](const PHLWINDOW& a, const PHLWINDOW& b) {
-        return a->m_position.x < b->m_position.x;
-    });
+    auto pTiled = pActiveMonitor->m_activeWorkspace->m_space->algorithm()->tiledAlgo().get();
+    Layout::Tiled::CScrollingAlgorithm* pScrolling = dynamic_cast<Layout::Tiled::CScrollingAlgorithm*>(pTiled);
+    if (!pScrolling) {
+        return {}; // Not using scrolling layout
+    }
 
-    PHLWINDOW pOriginalActive = nullptr;
-    for (auto const& w : ws_windows) {
-        if (g_pCompositor->isWindowActive(w)) {
-            pOriginalActive = w;
-            break;
+    // Read current focus fit method
+    int64_t current_fit = getConfigValueInt("scrolling:focus_fit_method", 1);
+
+    // Apply column width to all columns in the scrolling data
+    for (auto const& pColumn : pScrolling->m_scrollingData->columns) {
+        if (pColumn) {
+            pColumn->setColumnWidth((float)width);
         }
     }
 
-    // Store original states to restore later
-    bool animations_enabled = true;
-    {
-        auto reply = Config::mgr()->getConfigValue("animations:enabled");
-        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
-            animations_enabled = *(int*)(*reply.dataptr) != 0;
+    // Also update the config value so new windows get this width
+    auto reply = Config::mgr()->getConfigValue("scrolling:column_width");
+    if (reply.dataptr && reply.type) {
+        if (*reply.type == typeid(float)) {
+            *(float*)(*reply.dataptr) = (float)width;
+        } else if (*reply.type == typeid(double)) {
+            *(double*)(*reply.dataptr) = width;
         }
     }
 
-    int orig_fit = 1;
-    {
-        auto reply = Config::mgr()->getConfigValue("scrolling:focus_fit_method");
-        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
-            orig_fit = *(int*)(*reply.dataptr);
-        }
-    }
-
-    int final_fit_method = 1;
-    if (partitions > 1) {
-        final_fit_method = (orig_fit == 0) ? 0 : 1;
-    }
-
-    // Set configuration values dynamically
-    {
-        auto reply = Config::mgr()->getConfigValue("animations:enabled");
-        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
-            *(int*)(*reply.dataptr) = 0;
-        }
-    }
-    {
-        auto reply = Config::mgr()->getConfigValue("scrolling:focus_fit_method");
-        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
-            *(int*)(*reply.dataptr) = final_fit_method;
-        }
-    }
-    {
-        auto reply = Config::mgr()->getConfigValue("scrolling:column_width");
-        if (reply.dataptr && reply.type) {
-            if (*reply.type == typeid(float)) {
-                *(float*)(*reply.dataptr) = (float)width;
-            } else if (*reply.type == typeid(double)) {
-                *(double*)(*reply.dataptr) = width;
-            }
-        }
-    }
-
-    // Apply resizing sequentially to every window
-    for (auto const& w : ws_windows) {
-        Desktop::focusState()->fullWindowFocus(w, Desktop::FOCUS_REASON_OTHER);
-        g_layoutManager->layoutMsg("colresize " + width_str);
-    }
-
-    // Restore original active focus / alignment
-    if (pOriginalActive) {
-        if (final_fit_method == 1) {
-            // Find active index
-            int active_idx = 0;
-            for (size_t i = 0; i < ws_windows.size(); ++i) {
-                if (ws_windows[i] == pOriginalActive) {
-                    active_idx = i;
-                    break;
+    // Align the active column according to the focus fit method
+    PHLWINDOW pActiveWindow = Desktop::focusState()->window();
+    if (pActiveWindow) {
+        SP<Layout::ITarget> pTarget = getTargetForWindow(pActiveWindow);
+        if (pTarget) {
+            auto pTargetData = pScrolling->dataFor(pTarget);
+            if (pTargetData && pTargetData->column) {
+                auto pColumn = pTargetData->column.lock();
+                if (pColumn) {
+                    alignActiveColumn(pScrolling, pColumn, current_fit);
                 }
             }
-
-            int P = std::max(1, partitions);
-            int away_idx = 0;
-            if (active_idx < P) {
-                away_idx = (int)ws_windows.size() - 1;
-            }
-            
-            Desktop::focusState()->fullWindowFocus(ws_windows[away_idx], Desktop::FOCUS_REASON_OTHER);
-
-            int start_idx = (active_idx / P) * P;
-            if (start_idx < (int)ws_windows.size()) {
-                Desktop::focusState()->fullWindowFocus(ws_windows[start_idx], Desktop::FOCUS_REASON_OTHER);
-            }
-
-            Desktop::focusState()->fullWindowFocus(pOriginalActive, Desktop::FOCUS_REASON_OTHER);
-        } else {
-            Desktop::focusState()->fullWindowFocus(pOriginalActive, Desktop::FOCUS_REASON_OTHER);
         }
     }
 
-    // Restore settings
-    {
-        auto reply = Config::mgr()->getConfigValue("scrolling:focus_fit_method");
-        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
-            *(int*)(*reply.dataptr) = final_fit_method;
-        }
-    }
-    {
-        auto reply = Config::mgr()->getConfigValue("animations:enabled");
-        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
-            *(int*)(*reply.dataptr) = animations_enabled ? 1 : 0;
-        }
-    }
+    // Recalculate layout to apply changes
+    g_layoutManager->recalculateMonitor(pActiveMonitor);
 
     return {};
 }
@@ -255,118 +249,55 @@ SDispatchResult handlePartitions(std::string args) {
 SDispatchResult handleToggleCenter(std::string) {
     logState("Dispatcher: togglecenter");
     // Read current focus fit method
-    int current_fit = 1;
-    {
-        auto reply = Config::mgr()->getConfigValue("scrolling:focus_fit_method");
-        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
-            current_fit = *(int*)(*reply.dataptr);
-        }
-    }
-    int new_fit = (current_fit == 0) ? 1 : 0;
+    int64_t current_fit = getConfigValueInt("scrolling:focus_fit_method", 1);
+    int64_t new_fit = (current_fit == 0) ? 1 : 0;
 
-    // Get active workspace ID
+    // Apply focus fit method config
+    setConfigValueInt("scrolling:focus_fit_method", new_fit);
+
+    // Get active monitor/workspace
     PHLMONITOR pActiveMonitor = g_pCompositor->getMonitorFromCursor();
     if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) {
         return {false, false, "No active workspace found"};
     }
-    WORKSPACEID ws_id = pActiveMonitor->m_activeWorkspace->m_id;
 
-    // Get windows on the active workspace and sort them left-to-right
-    std::vector<PHLWINDOW> ws_windows;
-    for (auto const& w : g_pCompositor->m_windows) {
-        if (w && w->m_workspace && w->m_workspace->m_id == ws_id && !w->isHidden() && w->m_isMapped && !w->m_isFloating) {
-            ws_windows.push_back(w);
-        }
-    }
-    
-    if (ws_windows.empty()) {
+    // Try to get CScrollingAlgorithm
+    if (!pActiveMonitor->m_activeWorkspace->m_space || !pActiveMonitor->m_activeWorkspace->m_space->algorithm()) {
         return {};
     }
 
-    std::sort(ws_windows.begin(), ws_windows.end(), [](const PHLWINDOW& a, const PHLWINDOW& b) {
-        return a->m_position.x < b->m_position.x;
-    });
-
-    PHLWINDOW pActiveWindow = nullptr;
-    int active_idx = 0;
-    for (size_t i = 0; i < ws_windows.size(); ++i) {
-        if (g_pCompositor->isWindowActive(ws_windows[i])) {
-            pActiveWindow = ws_windows[i];
-            active_idx = i;
-            break;
-        }
+    auto pTiled = pActiveMonitor->m_activeWorkspace->m_space->algorithm()->tiledAlgo().get();
+    Layout::Tiled::CScrollingAlgorithm* pScrolling = dynamic_cast<Layout::Tiled::CScrollingAlgorithm*>(pTiled);
+    if (!pScrolling) {
+        return {}; // Not using scrolling layout
     }
 
-    // Read column width
-    double col_width = 0.5;
-    {
-        auto reply = Config::mgr()->getConfigValue("scrolling:column_width");
-        if (reply.dataptr && reply.type) {
-            if (*reply.type == typeid(float)) {
-                col_width = *(float*)(*reply.dataptr);
-            } else if (*reply.type == typeid(double)) {
-                col_width = *(double*)(*reply.dataptr);
-            }
-        }
-    }
-    int P = std::max(1, (int)std::round(1.0 / col_width));
-
-    bool animations_enabled = true;
-    {
-        auto reply = Config::mgr()->getConfigValue("animations:enabled");
-        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
-            animations_enabled = *(int*)(*reply.dataptr) != 0;
-        }
+    // Get active window
+    PHLWINDOW pActiveWindow = Desktop::focusState()->window();
+    if (!pActiveWindow) {
+        return {};
     }
 
-    // Apply focus fit method
-    {
-        auto reply = Config::mgr()->getConfigValue("animations:enabled");
-        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
-            *(int*)(*reply.dataptr) = 0;
-        }
-    }
-    {
-        auto reply = Config::mgr()->getConfigValue("scrolling:focus_fit_method");
-        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
-            *(int*)(*reply.dataptr) = new_fit;
-        }
+    // Find ITarget for active window
+    SP<Layout::ITarget> pTarget = getTargetForWindow(pActiveWindow);
+    if (!pTarget) {
+        return {};
     }
 
-    if (new_fit == 1) {
-        // Toggle OFF (fit mode): Scroll away to break centered state, then align
-        int away_idx = 0;
-        if (active_idx < P) {
-            away_idx = (int)ws_windows.size() - 1;
-        }
-        
-        Desktop::focusState()->fullWindowFocus(ws_windows[away_idx], Desktop::FOCUS_REASON_OTHER);
-
-        int start_idx = (active_idx / P) * P;
-        if (start_idx < (int)ws_windows.size()) {
-            Desktop::focusState()->fullWindowFocus(ws_windows[start_idx], Desktop::FOCUS_REASON_OTHER);
-        }
-
-        if (pActiveWindow) {
-            Desktop::focusState()->fullWindowFocus(pActiveWindow, Desktop::FOCUS_REASON_OTHER);
-        }
-    } else {
-        // Toggle ON (center mode): Jitter focus change to center active window
-        int jitter_idx = (active_idx == 0 && ws_windows.size() > 1) ? 1 : 0;
-        Desktop::focusState()->fullWindowFocus(ws_windows[jitter_idx], Desktop::FOCUS_REASON_OTHER);
-        
-        if (pActiveWindow) {
-            Desktop::focusState()->fullWindowFocus(pActiveWindow, Desktop::FOCUS_REASON_OTHER);
-        }
+    auto pTargetData = pScrolling->dataFor(pTarget);
+    if (!pTargetData || !pTargetData->column) {
+        return {};
     }
 
-    // Restore animations
-    {
-        auto reply = Config::mgr()->getConfigValue("animations:enabled");
-        if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
-            *(int*)(*reply.dataptr) = animations_enabled ? 1 : 0;
-        }
+    auto pColumn = pTargetData->column.lock();
+    if (!pColumn) {
+        return {};
     }
+
+    alignActiveColumn(pScrolling, pColumn, new_fit);
+
+    // Recalculate layout
+    g_layoutManager->recalculateMonitor(pActiveMonitor);
 
     return {};
 }
@@ -449,20 +380,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
                     if (pOther) {
                         // Temporarily disable animations for a seamless layout refresh
-                        bool animations_enabled = true;
-                        {
-                            auto reply = Config::mgr()->getConfigValue("animations:enabled");
-                            if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
-                                animations_enabled = *(int*)(*reply.dataptr) != 0;
-                            }
-                        }
+                        bool animations_enabled = getConfigValueInt("animations:enabled", 1) != 0;
 
-                        {
-                            auto reply = Config::mgr()->getConfigValue("animations:enabled");
-                            if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
-                                *(int*)(*reply.dataptr) = 0;
-                            }
-                        }
+                        setConfigValueInt("animations:enabled", 0);
 
                         // Focus the other window in this tick to force a layout resize
                         Desktop::focusState()->fullWindowFocus(pOther, Desktop::FOCUS_REASON_OTHER);
@@ -473,10 +393,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
                                 Desktop::focusState()->fullWindowFocus(w, Desktop::FOCUS_REASON_OTHER);
                             }
                             // Restore animations
-                            auto reply = Config::mgr()->getConfigValue("animations:enabled");
-                            if (reply.dataptr && reply.type && *reply.type == typeid(int)) {
-                                *(int*)(*reply.dataptr) = animations_enabled ? 1 : 0;
-                            }
+                            setConfigValueInt("animations:enabled", animations_enabled ? 1 : 0);
                         });
                     }
                 }
