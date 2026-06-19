@@ -292,7 +292,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     // Register event listeners for debug logging
     Event::bus()->m_events.window.active.listenStatic([](PHLWINDOW w, auto reason) {
-        logState("Focus changed to " + getAddressStr(w) + " (" + (w ? w->m_class : "none") + ")");
+        logState("Focus changed to " + getAddressStr(w));
     });
 
     Event::bus()->m_events.workspace.active.listenStatic([](PHLWORKSPACE ws) {
@@ -300,7 +300,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     });
 
     Event::bus()->m_events.window.fullscreen.listenStatic([](PHLWINDOW w) {
-        logState("Window fullscreen state changed on " + getAddressStr(w) + " (" + (w ? w->m_class : "none") + ")");
+        logState("Window fullscreen state changed on " + getAddressStr(w));
         
         if (w && !w->isFullscreen() && w->m_workspace) {
             // Defer the focus jitter to the next idle cycle using doLater
@@ -345,11 +345,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     });
 
     Event::bus()->m_events.window.open.listenStatic([](PHLWINDOW w) {
-        logState("Window opened: " + getAddressStr(w) + " (" + (w ? w->m_class : "none") + ")");
+        logState("Window opened: " + getAddressStr(w));
     });
 
     Event::bus()->m_events.window.close.listenStatic([](PHLWINDOW w) {
-        logState("Window closed: " + getAddressStr(w) + " (" + (w ? w->m_class : "none") + ")");
+        logState("Window closed: " + getAddressStr(w));
     });
 
     HyprlandAPI::addNotification(PHANDLE, "[hyprscrolling-plus] Loaded successfully!",
