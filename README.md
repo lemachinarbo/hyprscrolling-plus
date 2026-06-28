@@ -45,6 +45,20 @@ bind = SUPER ALT, C, scrollingplus:togglecenter,
 bind = SUPER ALT, Z, scrollingplus:togglezen, 0.0
 ```
 
+## Configuration
+
+By default, Zen mode and Centering mode are per-workspace. If you prefer these modes to apply globally across all workspaces, enable them in your `hyprland.conf`:
+
+```hyprland
+plugin {
+    scrollingplus {
+        # Set to 1 to enable global mode across workspaces (default is 0)
+        zen_mode_global = 1
+        center_mode_global = 1
+    }
+}
+```
+
 ## Installation
 
 ### Persistent Installation (hyprpm)
