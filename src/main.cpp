@@ -108,6 +108,7 @@ static void alignActiveColumn(Layout::Tiled::CScrollingAlgorithm* pScrolling, SP
 }
 
 void logState(const std::string& action) {
+    return; // Debug logging disabled
     std::ofstream logFile("/tmp/hyprscrolling-plus.log", std::ios::app);
     if (!logFile.is_open()) return;
 
@@ -247,29 +248,16 @@ static SWorkspaceSettings& getWorkspaceSettings(WORKSPACEID ws_id) {
     return g_workspaceSettings[ws_id];
 }
 
-static bool isFocusModeActiveOnScreen() {
-    const char* xdg = getenv("XDG_RUNTIME_DIR");
-    std::string path;
-    if (xdg) {
-        path = std::string(xdg) + "/hypr-focus-mode-v3/active";
-    } else {
-        path = "/tmp/hypr-focus-mode-v3/active";
-    }
-    struct stat buffer;
-    return (stat(path.c_str(), &buffer) == 0);
-}
-
-static void runFocusModeScript() {
-    pid_t pid = fork();
-    if (pid == 0) {
-        pid_t pid2 = fork();
-        if (pid2 == 0) {
-            execl("/home/lemachi/.local/bin/focus-mode.sh", "focus-mode.sh", "0.0", (char*)NULL);
-            _exit(127);
+static void syncWorkspaceZenOpacity(WORKSPACEID ws_id, bool zenActive) {
+    for (auto const& w : g_pCompositor->m_windows) {
+        if (w && w->m_isMapped && !w->isHidden() && w->m_workspace && w->m_workspace->m_id == ws_id && !w->m_isFloating) {
+            bool isActive = g_pCompositor->isWindowActive(w);
+            float targetAlpha = (zenActive && !isActive) ? 0.0f : 1.0f;
+            
+            if (w->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)) {
+                w->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)->setValueAndWarp(targetAlpha);
+            }
         }
-        _exit(0);
-    } else if (pid > 0) {
-        waitpid(pid, nullptr, 0);
     }
 }
 
@@ -289,12 +277,46 @@ SDispatchResult handleToggleZen(std::string args) {
     }
 
     logState("handleToggleZen: toggled activeWS=" + std::to_string(activeWS) + 
-             " to active=" + std::to_string(g_zenModeActive) +
-             ", isScreenActive=" + std::to_string(isFocusModeActiveOnScreen()));
+             " to active=" + std::to_string(g_zenModeActive));
 
-    // Synchronize visual state via the user's shell script
-    if (g_zenModeActive != isFocusModeActiveOnScreen()) {
-        runFocusModeScript();
+    // Update fit method / centering
+    int64_t target_fit_method = 1;
+    if (g_zenModeActive) {
+        target_fit_method = 0;
+    } else {
+        target_fit_method = isCenterModeGlobal() ? g_globalFocusFitMethod : getWorkspaceSettings(activeWS).focusFitMethod;
+    }
+    setConfigValueInt("scrolling:focus_fit_method", target_fit_method);
+
+    // Apply the opacity changes directly and instantly
+    syncWorkspaceZenOpacity(activeWS, g_zenModeActive);
+
+    // Center active column if Zen mode is turned ON
+    if (g_zenModeActive) {
+        if (pActiveMonitor->m_activeWorkspace->m_space && pActiveMonitor->m_activeWorkspace->m_space->algorithm()) {
+            auto pTiled = pActiveMonitor->m_activeWorkspace->m_space->algorithm()->tiledAlgo().get();
+            Layout::Tiled::CScrollingAlgorithm* pScrolling = dynamic_cast<Layout::Tiled::CScrollingAlgorithm*>(pTiled);
+            if (pScrolling) {
+                PHLWINDOW pActiveWindow = Desktop::focusState()->window();
+                if (pActiveWindow) {
+                    SP<Layout::ITarget> pTarget = getTargetForWindow(pActiveWindow);
+                    if (pTarget) {
+                        auto pTargetData = pScrolling->dataFor(pTarget);
+                        if (pTargetData && pTargetData->column) {
+                            auto pColumn = pTargetData->column.lock();
+                            if (pColumn) {
+                                alignActiveColumn(pScrolling, pColumn, 0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    g_layoutManager->recalculateMonitor(pActiveMonitor);
+    if (g_pHyprRenderer) {
+        g_pHyprRenderer->damageMonitor(pActiveMonitor);
     }
 
     return {};
@@ -472,9 +494,19 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:togglecenter", handleToggleCenter);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:togglezen", handleToggleZen);
 
-    // Register event listeners for debug logging
+    // Register event listeners for debug logging and focus warping
     activeWindowListener = Event::bus()->m_events.window.active.listen([](PHLWINDOW w, auto reason) {
         logState("Focus changed to " + getAddressStr(w));
+        if (w && w->m_workspace) {
+            WORKSPACEID ws_id = w->m_workspace->m_id;
+            bool zenGlobal = isZenModeGlobal();
+            bool isZenActive = zenGlobal ? g_zenModeActive : getWorkspaceSettings(ws_id).zenActive;
+            
+            if (isZenActive) {
+                // Instantly sync opacities to warp focus transition instantly
+                syncWorkspaceZenOpacity(ws_id, true);
+            }
+        }
     });
 
     activeWorkspaceListener = Event::bus()->m_events.workspace.active.listen([](PHLWORKSPACE ws) {
@@ -512,19 +544,17 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
             
             logState("Loaded WS" + std::to_string(newWS) + " Zen settings: active=" + std::to_string(g_zenModeActive));
 
-            // Sync screen state via the script
-            if (g_zenModeActive != isFocusModeActiveOnScreen()) {
-                runFocusModeScript();
-            }
+            // Sync the window opacity states on the new workspace
+            syncWorkspaceZenOpacity(newWS, g_zenModeActive);
 
-            // Restore the focus fit method for this workspace if Zen mode is inactive
-            if (!g_zenModeActive) {
-                if (!centerGlobal) {
-                    setConfigValueInt("scrolling:focus_fit_method", newSettings.focusFitMethod);
-                } else {
-                    setConfigValueInt("scrolling:focus_fit_method", g_globalFocusFitMethod);
-                }
+            // Restore the focus fit method for this workspace
+            int64_t target_fit_method = 1;
+            if (g_zenModeActive) {
+                target_fit_method = 0;
+            } else {
+                target_fit_method = centerGlobal ? g_globalFocusFitMethod : newSettings.focusFitMethod;
             }
+            setConfigValueInt("scrolling:focus_fit_method", target_fit_method);
 
             // Recalculate layout and damage monitor to refresh the viewport
             auto pMonitor = ws->m_monitor.lock();
@@ -559,8 +589,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
                                 if (pTargetData && pTargetData->column) {
                                     auto pColumn = pTargetData->column.lock();
                                     if (pColumn) {
-                                        int64_t current_fit = getConfigValueInt("scrolling:focus_fit_method", 1);
-                                        alignActiveColumn(pScrolling, pColumn, current_fit);
+                                        alignActiveColumn(pScrolling, pColumn, target_fit_method);
                                     }
                                 }
                             }
