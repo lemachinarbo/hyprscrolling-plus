@@ -1,0 +1,2 @@
+- On zen view if i close a window, all windows became visible again
+- if a workspace has x  windows, 2 visible 50/50 (window 2 and 3 are visible) and we switch to another ws with 3 windows, window 2 and 3 visible 50/50. IF i switch workspaces I expect windows to keep same positions. But no... sometimes the 3 window is focused and we get 50% window 3 and right side empty. Or it shows windows 1 and 2 when 2 and 3 were expected.
