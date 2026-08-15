@@ -24,17 +24,19 @@
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/desktop/Workspace.hpp>
-#include <hyprland/src/helpers/Monitor.hpp>
+#include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
+#include <hyprland/src/desktop/state/WindowState.hpp>
 #include <hyprland/src/layout/LayoutManager.hpp>
 #include <hyprland/src/layout/algorithm/Algorithm.hpp>
 #include <hyprland/src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
+#include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #undef private
 
@@ -80,11 +82,14 @@ static SP<Layout::ITarget> getTargetForWindow(PHLWINDOW pWindow) {
 }
 
 static void alignActiveColumn(Layout::Tiled::CScrollingAlgorithm* pScrolling, SP<Layout::Tiled::SColumnData> pColumn, int64_t fit_method) {
-    if (!pScrolling || !pColumn) return;
+    if (!pScrolling || !pColumn || !pScrolling->m_scrollingData || !pScrolling->m_scrollingData->controller) return;
+
+    int active_idx = pScrolling->m_scrollingData->idx(pColumn);
+    CBox usableArea = pScrolling->usableArea();
 
     if (fit_method == 0) {
-        // Center mode: center active column
-        pScrolling->m_scrollingData->centerCol(pColumn);
+        // Center mode: center active column directly on the tape controller
+        pScrolling->m_scrollingData->controller->centerStrip(active_idx, usableArea);
     } else {
         // Fit mode: align to the page grid boundary
         double col_width = 0.5;
@@ -98,23 +103,21 @@ static void alignActiveColumn(Layout::Tiled::CScrollingAlgorithm* pScrolling, SP
         }
         int P = std::max(1, (int)std::round(1.0 / col_width));
 
-        int active_idx = pScrolling->m_scrollingData->idx(pColumn);
         int start_idx = (active_idx / P) * P;
-
-        CBox usableArea = pScrolling->usableArea();
         double target_offset = pScrolling->m_scrollingData->controller->calculateStripStart(start_idx, usableArea);
         pScrolling->m_scrollingData->controller->setOffset(target_offset);
     }
+
+    pScrolling->m_scrollingData->recalculate(true);
 }
 
 void logState(const std::string& action) {
-    return; // Debug logging disabled
     std::ofstream logFile("/tmp/hyprscrolling-plus.log", std::ios::app);
     if (!logFile.is_open()) return;
 
     logFile << "[" << getTimestamp() << "] ACTION: " << action << "\n";
 
-    PHLMONITOR pActiveMonitor = g_pCompositor->getMonitorFromCursor();
+    PHLMONITOR pActiveMonitor = Desktop::focusState()->monitor();
     if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) {
         logFile << "  No active workspace\n\n";
         return;
@@ -123,25 +126,27 @@ void logState(const std::string& action) {
     logFile << "  Active Workspace: " << ws_id << "\n";
 
     std::vector<PHLWINDOW> ws_windows;
-    for (auto const& w : g_pCompositor->m_windows) {
+    for (auto const& w : Desktop::windowState()->windows()) {
         if (w && w->m_workspace && w->m_workspace->m_id == ws_id && !w->isHidden() && w->m_isMapped && !w->m_isFloating) {
             ws_windows.push_back(w);
         }
     }
 
     std::sort(ws_windows.begin(), ws_windows.end(), [](const PHLWINDOW& a, const PHLWINDOW& b) {
-        return a->m_position.x < b->m_position.x;
+        auto boxA = a->logicalBox(); auto boxB = b->logicalBox();
+        return (boxA ? boxA->x : 0) < (boxB ? boxB->x : 0);
     });
 
     logFile << "  Windows (sorted left-to-right):\n";
     for (size_t i = 0; i < ws_windows.size(); ++i) {
         auto w = ws_windows[i];
-        bool active = g_pCompositor->isWindowActive(w);
+        bool active = Desktop::focusState()->isWindowActive(w);
+        auto box = w->logicalBox();
         logFile << "    - Window " << i << " | " << getAddressStr(w)
                 << " | class: " << w->m_class
                 << " | title: " << w->m_title << "\n"
-                << "      pos: (" << (int)w->m_position.x << ", " << (int)w->m_position.y << ")"
-                << " | size: (" << (int)w->m_size.x << ", " << (int)w->m_size.y << ")"
+                << "      pos: (" << (int)(box ? box->x : 0) << ", " << (int)(box ? box->y : 0) << ")"
+                << " | size: (" << (int)(box ? box->width : 0) << ", " << (int)(box ? box->height : 0) << ")"
                 << (active ? " [FOCUSED]" : "")
                 << "\n";
     }
@@ -183,28 +188,6 @@ static void setConfigValueInt(const std::string& name, int64_t value) {
     }
 }
 
-static double getConfigValueFloat(const std::string& name, double defaultValue) {
-    auto reply = Config::mgr()->getConfigValue(name);
-    if (reply.dataptr && reply.type) {
-        if (*reply.type == typeid(float)) {
-            return *(float*)(*reply.dataptr);
-        } else if (*reply.type == typeid(double)) {
-            return *(double*)(*reply.dataptr);
-        }
-    }
-    return defaultValue;
-}
-
-static void setConfigValueFloat(const std::string& name, double value) {
-    auto reply = Config::mgr()->getConfigValue(name);
-    if (reply.dataptr && reply.type) {
-        if (*reply.type == typeid(float)) {
-            *(float*)(*reply.dataptr) = (float)value;
-        } else if (*reply.type == typeid(double)) {
-            *(double*)(*reply.dataptr) = value;
-        }
-    }
-}
 
 #include <hyprland/src/config/values/types/BoolValue.hpp>
 
@@ -213,7 +196,6 @@ static void setConfigValueFloat(const std::string& name, double value) {
 #include <sys/stat.h>
 
 static bool g_zenModeActive = false;
-static int64_t g_savedFocusFitMethod = 1;
 static int64_t g_globalFocusFitMethod = 1;
 
 static SP<Config::Values::CBoolValue> g_zenModeGlobalConfig;
@@ -249,9 +231,9 @@ static SWorkspaceSettings& getWorkspaceSettings(WORKSPACEID ws_id) {
 }
 
 static void syncWorkspaceZenOpacity(WORKSPACEID ws_id, bool zenActive) {
-    for (auto const& w : g_pCompositor->m_windows) {
+    for (auto const& w : Desktop::windowState()->windows()) {
         if (w && w->m_isMapped && !w->isHidden() && w->m_workspace && w->m_workspace->m_id == ws_id && !w->m_isFloating) {
-            bool isActive = g_pCompositor->isWindowActive(w);
+            bool isActive = Desktop::focusState()->isWindowActive(w);
             float targetAlpha = (zenActive && !isActive) ? 0.0f : 1.0f;
             
             if (w->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)) {
@@ -264,7 +246,7 @@ static void syncWorkspaceZenOpacity(WORKSPACEID ws_id, bool zenActive) {
 SDispatchResult handleToggleZen(std::string args) {
     logState("Dispatcher: togglezen " + args);
 
-    PHLMONITOR pActiveMonitor = g_pCompositor->getMonitorFromCursor();
+    PHLMONITOR pActiveMonitor = Desktop::focusState()->monitor();
     if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) {
         return {false, false, "No active workspace found"};
     }
@@ -337,7 +319,7 @@ SDispatchResult handlePartitions(std::string args) {
     }
 
     // Get current active monitor/workspace
-    PHLMONITOR pActiveMonitor = g_pCompositor->getMonitorFromCursor();
+    PHLMONITOR pActiveMonitor = Desktop::focusState()->monitor();
     if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) {
         return {false, false, "No active workspace found"};
     }
@@ -398,7 +380,7 @@ SDispatchResult handleToggleCenter(std::string) {
     logState("Dispatcher: togglecenter");
     
     // Get active monitor/workspace
-    PHLMONITOR pActiveMonitor = g_pCompositor->getMonitorFromCursor();
+    PHLMONITOR pActiveMonitor = Desktop::focusState()->monitor();
     if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) {
         return {false, false, "No active workspace found"};
     }
@@ -454,8 +436,11 @@ SDispatchResult handleToggleCenter(std::string) {
 
     alignActiveColumn(pScrolling, pColumn, new_fit);
 
-    // Recalculate layout
+    // Recalculate layout and damage monitor renderer
     g_layoutManager->recalculateMonitor(pActiveMonitor);
+    if (g_pHyprRenderer) {
+        g_pHyprRenderer->damageMonitor(pActiveMonitor);
+    }
 
     return {};
 }
@@ -484,18 +469,22 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     g_defaultFocusFitMethod = getConfigValueInt("scrolling:focus_fit_method", 1);
     g_globalFocusFitMethod = g_defaultFocusFitMethod;
 
-    PHLMONITOR pActiveMonitor = g_pCompositor->getMonitorFromCursor();
+    PHLMONITOR pActiveMonitor = Desktop::focusState()->monitor();
     if (pActiveMonitor && pActiveMonitor->m_activeWorkspace) {
         g_lastWorkspaceID = pActiveMonitor->m_activeWorkspace->m_id;
     }
 
-    // Register our custom dispatchers
+    // Register custom dispatchers (both colon and underscore versions for CLI compatibility)
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:partitions", handlePartitions);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:togglecenter", handleToggleCenter);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:togglezen", handleToggleZen);
 
+    HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_partitions", handlePartitions);
+    HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_togglecenter", handleToggleCenter);
+    HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_togglezen", handleToggleZen);
+
     // Register event listeners for debug logging and focus warping
-    activeWindowListener = Event::bus()->m_events.window.active.listen([](PHLWINDOW w, auto reason) {
+    activeWindowListener = Event::bus()->m_events.window.active.listen([](PHLWINDOW w, auto /* reason */) {
         logState("Focus changed to " + getAddressStr(w));
         if (w && w->m_workspace) {
             WORKSPACEID ws_id = w->m_workspace->m_id;
@@ -566,16 +555,16 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
                     if (pScrolling) {
                         PHLWINDOW pTargetWindow = nullptr;
                         // Find currently active window on this workspace
-                        for (auto const& w : g_pCompositor->m_windows) {
+                        for (auto const& w : Desktop::windowState()->windows()) {
                             if (w && w->m_workspace == ws && !w->isHidden() && w->m_isMapped && !w->m_isFloating) {
-                                if (g_pCompositor->isWindowActive(w)) {
+                                if (Desktop::focusState()->isWindowActive(w)) {
                                     pTargetWindow = w;
                                     break;
                                 }
                             }
                         }
                         if (!pTargetWindow) {
-                            for (auto const& w : g_pCompositor->m_windows) {
+                            for (auto const& w : Desktop::windowState()->windows()) {
                                 if (w && w->m_workspace == ws && !w->isHidden() && w->m_isMapped && !w->m_isFloating) {
                                     pTargetWindow = w;
                                     break;
@@ -610,7 +599,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     fullscreenListener = Event::bus()->m_events.window.fullscreen.listen([](PHLWINDOW w) {
         logState("Window fullscreen state changed on " + getAddressStr(w));
         
-        if (w && !w->isFullscreen() && w->m_workspace) {
+        if (w && !Fullscreen::controller()->isFullscreen(w) && w->m_workspace) {
             // Cancel previous timer if any was running to avoid overlaps
             if (pFullscreenRestoreTimer) {
                 pFullscreenRestoreTimer->cancel();
