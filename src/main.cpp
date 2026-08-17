@@ -68,6 +68,7 @@ struct SWorkspaceSettings {
     int64_t focusFitMethod = 1;
     int partitions = 2;
     int lastStartIdx = 0;
+    int gridScrollMode = 0; // 0 = Page Flip [P-by-P], 1 = Filmstrip Queue [1-by-1]
 };
 
 static std::unordered_map<WORKSPACEID, SWorkspaceSettings> g_workspaceSettings;
@@ -162,7 +163,80 @@ std::string getTimestamp() {
 }
 
 void logState(const std::string& action) {
-    (void)action;
+    std::ofstream logFile("/tmp/hyprscrolling-plus.log", std::ios::app);
+    if (!logFile.is_open()) return;
+
+    logFile << "[" << getTimestamp() << "] ACTION: " << action << "\n";
+
+    PHLMONITOR pActiveMonitor = Desktop::focusState()->monitor();
+    if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) {
+        logFile << "  No active workspace\n\n";
+        return;
+    }
+    WORKSPACEID ws_id = pActiveMonitor->m_activeWorkspace->m_id;
+    auto itWS = g_workspaceSettings.find(ws_id);
+    int wsPartitions = (itWS != g_workspaceSettings.end()) ? itWS->second.partitions : -1;
+    bool wsZen = (itWS != g_workspaceSettings.end()) ? itWS->second.zenActive : false;
+    int64_t wsFit = (itWS != g_workspaceSettings.end()) ? itWS->second.focusFitMethod : -1;
+
+    logFile << "  Workspace ID: " << ws_id 
+            << " | Stored Partitions: " << wsPartitions
+            << " | Zen: " << (wsZen ? "true" : "false")
+            << " | FitMethod: " << wsFit << "\n";
+
+    logFile << "  Hyprland Configs -> focus_fit_method: " << getConfigValueInt("scrolling:focus_fit_method", -1)
+            << " | grid_scroll_mode: " << getConfigValueInt("plugin:scrollingplus:grid_scroll_mode", -1)
+            << "\n";
+
+    PHLWORKSPACE pWorkspace = pActiveMonitor->m_activeWorkspace;
+    if (pWorkspace && pWorkspace->m_space && pWorkspace->m_space->algorithm()) {
+        auto pTiled = pWorkspace->m_space->algorithm()->tiledAlgo().get();
+        Layout::Tiled::CScrollingAlgorithm* pScrolling = dynamic_cast<Layout::Tiled::CScrollingAlgorithm*>(pTiled);
+        if (pScrolling && pScrolling->m_scrollingData) {
+            if (pScrolling->m_scrollingData->controller) {
+                logFile << "  Tape Controller -> offset: " << pScrolling->m_scrollingData->controller->getOffset()
+                        << " | usableArea: (" << pScrolling->usableArea().width << "x" << pScrolling->usableArea().height << ")\n";
+            }
+            logFile << "  Columns count: " << pScrolling->m_scrollingData->columns.size() << ":\n";
+            for (size_t i = 0; i < pScrolling->m_scrollingData->columns.size(); ++i) {
+                auto col = pScrolling->m_scrollingData->columns[i];
+                if (col) {
+                    logFile << "    Col " << i << ": width=" << col->getColumnWidth()
+                            << " | targetDatas=" << col->targetDatas.size() << "\n";
+                }
+            }
+        }
+    }
+
+    std::vector<PHLWINDOW> ws_windows;
+    for (auto const& w : Desktop::windowState()->windows()) {
+        if (w && w->m_isMapped && !w->isHidden() && w->m_workspace && w->m_workspace->m_id == ws_id && !w->m_isFloating) {
+            ws_windows.push_back(w);
+        }
+    }
+
+    std::sort(ws_windows.begin(), ws_windows.end(), [](PHLWINDOW a, PHLWINDOW b) {
+        auto boxA = a->logicalBox();
+        auto boxB = b->logicalBox();
+        int xA = boxA ? boxA->x : 0;
+        int xB = boxB ? boxB->x : 0;
+        return xA < xB;
+    });
+
+    logFile << "  Windows (sorted left-to-right):\n";
+    for (size_t i = 0; i < ws_windows.size(); ++i) {
+        auto w = ws_windows[i];
+        bool active = Desktop::focusState()->isWindowActive(w);
+        auto box = w->logicalBox();
+        logFile << "    - Window " << i << " | " << getAddressStr(w)
+                << " | class: " << w->m_class
+                << " | title: " << w->m_title << "\n"
+                << "      pos: (" << (int)(box ? box->x : 0) << ", " << (int)(box ? box->y : 0) << ")"
+                << " | size: (" << (int)(box ? box->width : 0) << ", " << (int)(box ? box->height : 0) << ")"
+                << (active ? " [FOCUSED]" : "")
+                << "\n";
+    }
+    logFile << "\n";
 }
 
 static SP<Layout::ITarget> getTargetForWindow(PHLWINDOW pWindow) {
@@ -191,6 +265,7 @@ static SWorkspaceSettings& getWorkspaceSettings(WORKSPACEID ws_id) {
         settings.focusFitMethod = 1; // 1 = Grid Partition Mode (Hyprland fitCol)
         settings.partitions = 2;
         settings.lastStartIdx = 0;
+        settings.gridScrollMode = 0; // Default 0 = Page Flip [P-by-P]
         g_workspaceSettings[ws_id] = settings;
     }
     return g_workspaceSettings[ws_id];
@@ -254,8 +329,8 @@ static void alignActiveColumn(Layout::Tiled::CScrollingAlgorithm* pScrolling, SP
             int P = std::max(1, (int)std::round(1.0 / col_width));
             int total_cols = (int)pScrolling->m_scrollingData->columns.size();
 
-            int grid_mode = getConfigValueInt("plugin:scrollingplus:grid_scroll_mode", 0);
             auto& settings = getWorkspaceSettings(ws_id);
+            int grid_mode = settings.gridScrollMode;
 
             int start_idx = 0;
             if (grid_mode == 1) {
@@ -448,18 +523,20 @@ SDispatchResult handleToggleCenter(std::string) {
 }
 
 SDispatchResult handleToggleGridScrollMode(std::string) {
-    int current_mode = getConfigValueInt("plugin:scrollingplus:grid_scroll_mode", 0);
-    int new_mode = (current_mode == 0) ? 1 : 0;
-    setConfigValueInt("plugin:scrollingplus:grid_scroll_mode", new_mode);
+    PHLMONITOR pActiveMonitor = Desktop::focusState()->monitor();
+    if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) {
+        return {false, false, "No active workspace"};
+    }
+    WORKSPACEID ws_id = pActiveMonitor->m_activeWorkspace->m_id;
 
-    std::string msg = (new_mode == 1) ? "Grid Scroll Mode: Filmstrip Queue (Window-by-Window)" : "Grid Scroll Mode: Page Flip (Group-by-Group)";
+    auto& settings = getWorkspaceSettings(ws_id);
+    settings.gridScrollMode = (settings.gridScrollMode == 0) ? 1 : 0;
+
+    std::string msg = (settings.gridScrollMode == 1) ? "Grid Mode: Filmstrip Queue [1-by-1]" : "Grid Mode: Page Flip [P-by-P]";
     logState(msg);
     HyprlandAPI::addNotification(PHANDLE, "[hyprscrolling-plus] " + msg, CHyprColor{0.2, 0.8, 1.0, 1.0}, 3000);
 
-    PHLMONITOR pActiveMonitor = Desktop::focusState()->monitor();
-    if (pActiveMonitor && pActiveMonitor->m_activeWorkspace) {
-        refreshWorkspaceTape(pActiveMonitor->m_activeWorkspace->m_id);
-    }
+    refreshWorkspaceTape(ws_id);
     return {};
 }
 
