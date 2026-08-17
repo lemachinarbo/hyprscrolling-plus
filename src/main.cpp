@@ -346,9 +346,6 @@ static void alignActiveColumn(Layout::Tiled::CScrollingAlgorithm* pScrolling, SP
             } else {
                 // Page Flip Mode (Discrete P-by-P page jumping: [0-1], [2-3], [4-5])
                 start_idx = (active_idx / P) * P;
-                if (start_idx + P > total_cols && total_cols >= P) {
-                    start_idx = total_cols - P;
-                }
             }
 
             if (start_idx < 0) start_idx = 0;
@@ -439,7 +436,7 @@ SDispatchResult handlePartitions(std::string args) {
     getWorkspaceSettings(activeWS).focusFitMethod = 1;
     setConfigValueInt("scrolling:focus_fit_method", 1);
 
-    double width = (partitions > 1) ? ((1.0 / partitions) + 0.0001) : 1.0;
+    double width = (partitions > 1) ? (1.0 / partitions) : 1.0;
 
     // Update global config value ONLY when user explicitly dispatches scrollingplus:partitions
     auto reply = Config::mgr()->getConfigValue("scrolling:column_width");
