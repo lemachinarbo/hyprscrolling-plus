@@ -366,8 +366,22 @@ static void alignActiveColumn(Layout::Tiled::CScrollingAlgorithm* pScrolling, SP
     pScrolling->m_scrollingData->recalculate(false);
 }
 
+static SP<Layout::Tiled::SColumnData> findColumnForWindow(Layout::Tiled::CScrollingAlgorithm* pScrolling, PHLWINDOW pWindow) {
+    if (!pScrolling || !pScrolling->m_scrollingData || !pWindow) return nullptr;
+    for (auto const& col : pScrolling->m_scrollingData->columns) {
+        if (!col) continue;
+        for (auto const& td : col->targetDatas) {
+            if (td && td->target) {
+                auto t = td->target.lock();
+                if (t && t->window() == pWindow) return col;
+            }
+        }
+    }
+    return nullptr;
+}
+
 // Re-align viewport tape for a workspace without overwriting existing column widths or scrolling:column_width
-static void refreshWorkspaceTape(WORKSPACEID ws_id) {
+static void refreshWorkspaceTape(WORKSPACEID ws_id, PHLWINDOW pExplicitTargetWindow = nullptr) {
     if (ws_id == -1) return;
     auto& settings = getWorkspaceSettings(ws_id);
 
@@ -379,14 +393,16 @@ static void refreshWorkspaceTape(WORKSPACEID ws_id) {
     if (!pScrolling || !pScrolling->m_scrollingData) return;
 
     // Find active window or first visible window on workspace
-    PHLWINDOW pTargetWindow = nullptr;
-    for (auto const& w : Desktop::windowState()->windows()) {
-        if (w && w->m_workspace && w->m_workspace->m_id == ws_id && !w->isHidden() && w->m_isMapped && !w->m_isFloating) {
-            if (Desktop::focusState()->isWindowActive(w)) {
-                pTargetWindow = w;
-                break;
+    PHLWINDOW pTargetWindow = pExplicitTargetWindow;
+    if (!pTargetWindow) {
+        for (auto const& w : Desktop::windowState()->windows()) {
+            if (w && w->m_workspace && w->m_workspace->m_id == ws_id && !w->isHidden() && w->m_isMapped && !w->m_isFloating) {
+                if (Desktop::focusState()->isWindowActive(w)) {
+                    pTargetWindow = w;
+                    break;
+                }
+                if (!pTargetWindow) pTargetWindow = w;
             }
-            if (!pTargetWindow) pTargetWindow = w;
         }
     }
 
@@ -394,13 +410,7 @@ static void refreshWorkspaceTape(WORKSPACEID ws_id) {
 
     SP<Layout::Tiled::SColumnData> pColumn = nullptr;
     if (pTargetWindow) {
-        SP<Layout::ITarget> pTarget = getTargetForWindow(pTargetWindow);
-        if (pTarget) {
-            auto pTargetData = pScrolling->dataFor(pTarget);
-            if (pTargetData && pTargetData->column) {
-                pColumn = pTargetData->column.lock();
-            }
-        }
+        pColumn = findColumnForWindow(pScrolling, pTargetWindow);
     }
 
     alignActiveColumn(pScrolling, pColumn, current_fit, ws_id);
@@ -552,13 +562,7 @@ SDispatchResult handleFocusLeft(std::string) {
     PHLWINDOW pActiveWindow = Desktop::focusState()->window();
     if (!pActiveWindow) return {};
 
-    SP<Layout::ITarget> pTarget = getTargetForWindow(pActiveWindow);
-    if (!pTarget) return {};
-
-    auto pTargetData = pScrolling->dataFor(pTarget);
-    if (!pTargetData || !pTargetData->column) return {};
-
-    auto pColumn = pTargetData->column.lock();
+    auto pColumn = findColumnForWindow(pScrolling, pActiveWindow);
     if (!pColumn) return {};
 
     int current_idx = pScrolling->m_scrollingData->idx(pColumn);
@@ -583,9 +587,8 @@ SDispatchResult handleFocusLeft(std::string) {
 
     if (targetWin) {
         logState("FocusLeft: Moving focus to column " + std::to_string(current_idx - 1) + " window " + getAddressStr(targetWin));
-        std::string addrStr = "address:0x" + getAddressStr(targetWin);
-        HyprlandAPI::invokeHyprctlCommand("focuswindow", addrStr);
-        refreshWorkspaceTape(pWorkspace->m_id);
+        Desktop::focusState()->fullWindowFocus(targetWin, Desktop::FOCUS_REASON_KEYBIND);
+        refreshWorkspaceTape(pWorkspace->m_id, targetWin);
     }
 
     return {};
@@ -606,13 +609,7 @@ SDispatchResult handleFocusRight(std::string) {
     PHLWINDOW pActiveWindow = Desktop::focusState()->window();
     if (!pActiveWindow) return {};
 
-    SP<Layout::ITarget> pTarget = getTargetForWindow(pActiveWindow);
-    if (!pTarget) return {};
-
-    auto pTargetData = pScrolling->dataFor(pTarget);
-    if (!pTargetData || !pTargetData->column) return {};
-
-    auto pColumn = pTargetData->column.lock();
+    auto pColumn = findColumnForWindow(pScrolling, pActiveWindow);
     if (!pColumn) return {};
 
     int current_idx = pScrolling->m_scrollingData->idx(pColumn);
@@ -639,9 +636,8 @@ SDispatchResult handleFocusRight(std::string) {
 
     if (targetWin) {
         logState("FocusRight: Moving focus to column " + std::to_string(current_idx + 1) + " window " + getAddressStr(targetWin));
-        std::string addrStr = "address:0x" + getAddressStr(targetWin);
-        HyprlandAPI::invokeHyprctlCommand("focuswindow", addrStr);
-        refreshWorkspaceTape(pWorkspace->m_id);
+        Desktop::focusState()->fullWindowFocus(targetWin, Desktop::FOCUS_REASON_KEYBIND);
+        refreshWorkspaceTape(pWorkspace->m_id, targetWin);
     }
 
     return {};
@@ -751,8 +747,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addConfigValueV2(PHANDLE, g_centerModeGlobalConfig);
     HyprlandAPI::addConfigValueV2(PHANDLE, g_gridScrollModeConfig);
 
-    g_defaultFocusFitMethod = getConfigValueInt("scrolling:focus_fit_method", 1);
-    g_globalFocusFitMethod = g_defaultFocusFitMethod;
+    setConfigValueInt("scrolling:focus_fit_method", 1);
+    g_defaultFocusFitMethod = 1;
+    g_globalFocusFitMethod = 1;
 
     PHLMONITOR pActiveMonitor = Desktop::focusState()->monitor();
     if (pActiveMonitor && pActiveMonitor->m_activeWorkspace) {
@@ -789,7 +786,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
             if (isZenActive) {
                 syncWorkspaceZenOpacity(ws_id, true);
             }
-            refreshWorkspaceTape(ws_id);
+            refreshWorkspaceTape(ws_id, w);
         }
     });
 
