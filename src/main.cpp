@@ -259,7 +259,7 @@ static void alignActiveColumn(Layout::Tiled::CScrollingAlgorithm* pScrolling, SP
 
             int start_idx = 0;
             if (grid_mode == 1) {
-                // Filmstrip Queue Mode (Smooth window-by-window queueing)
+                // Filmstrip Queue Mode (Continuous 1-by-1 window sliding)
                 int last = settings.lastStartIdx;
                 if (active_idx > last + P - 1) {
                     start_idx = active_idx - P + 1;
@@ -269,14 +269,15 @@ static void alignActiveColumn(Layout::Tiled::CScrollingAlgorithm* pScrolling, SP
                     start_idx = last;
                 }
             } else {
-                // Page Flip Mode (Discrete grid page jumping)
+                // Page Flip Mode (Discrete P-by-P page jumping: [0-1], [2-3], [4-5])
                 start_idx = (active_idx / P) * P;
+                if (start_idx + P > total_cols && total_cols >= P) {
+                    start_idx = total_cols - P;
+                }
             }
 
-            if (start_idx + P > total_cols && total_cols >= P) {
-                start_idx = total_cols - P;
-            }
             if (start_idx < 0) start_idx = 0;
+            if (start_idx > total_cols - 1) start_idx = total_cols - 1;
             settings.lastStartIdx = start_idx;
 
             // Direct pixel calculation of tape offset to guarantee 0px center shift:
