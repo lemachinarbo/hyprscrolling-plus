@@ -719,6 +719,32 @@ SDispatchResult handleMoveRight(std::string args) {
     return {};
 }
 
+SDispatchResult handleToggleMaximize(std::string) {
+    logState("Dispatcher: togglemaximize");
+    PHLMONITOR pActiveMonitor = Desktop::focusState()->monitor();
+    if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) return {};
+
+    PHLWORKSPACE pWorkspace = pActiveMonitor->m_activeWorkspace;
+    if (!pWorkspace || !pWorkspace->m_space || !pWorkspace->m_space->algorithm()) return {};
+
+    auto pTiled = pWorkspace->m_space->algorithm()->tiledAlgo().get();
+    Layout::Tiled::CScrollingAlgorithm* pScrolling = dynamic_cast<Layout::Tiled::CScrollingAlgorithm*>(pTiled);
+    if (!pScrolling || !pScrolling->m_scrollingData) return {};
+
+    PHLWINDOW pActiveWindow = Desktop::focusState()->window();
+    if (!pActiveWindow) return {};
+
+    auto pColumn = findColumnForWindow(pScrolling, pActiveWindow);
+    if (!pColumn) return {};
+
+    double currentWidth = pColumn->getColumnWidth();
+    double targetWidth = (currentWidth > 0.8) ? 0.5 : 1.0;
+    pColumn->setColumnWidth(targetWidth);
+
+    refreshWorkspaceTape(pWorkspace->m_id, pActiveWindow, true);
+    return {};
+}
+
 
 
 
@@ -787,6 +813,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:focusright", handleFocusRight);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:moveleft", handleMoveLeft);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:moveright", handleMoveRight);
+    HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:togglemaximize", handleToggleMaximize);
 
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_partitions", handlePartitions);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_togglecenter", handleToggleCenter);
@@ -795,6 +822,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_focusright", handleFocusRight);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_moveleft", handleMoveLeft);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_moveright", handleMoveRight);
+    HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_togglemaximize", handleToggleMaximize);
 
     // Also register as Lua-callable plugin functions (hl.plugin.scrollingplus.<name>(...))
     HyprlandAPI::addLuaFunction(PHANDLE, "scrollingplus", "partitions", luaDispatchWrapper<handlePartitions>);
@@ -804,6 +832,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addLuaFunction(PHANDLE, "scrollingplus", "focusright", luaDispatchWrapper<handleFocusRight>);
     HyprlandAPI::addLuaFunction(PHANDLE, "scrollingplus", "moveleft", luaDispatchWrapper<handleMoveLeft>);
     HyprlandAPI::addLuaFunction(PHANDLE, "scrollingplus", "moveright", luaDispatchWrapper<handleMoveRight>);
+    HyprlandAPI::addLuaFunction(PHANDLE, "scrollingplus", "togglemaximize", luaDispatchWrapper<handleToggleMaximize>);
 
 
 
@@ -971,6 +1000,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus:focusright");
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus:moveleft");
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus:moveright");
+    HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus:togglemaximize");
 
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus_partitions");
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus_togglecenter");
@@ -979,6 +1009,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus_focusright");
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus_moveleft");
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus_moveright");
+    HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus_togglemaximize");
 
     HyprlandAPI::removeLuaFunction(PHANDLE, "scrollingplus", "partitions");
     HyprlandAPI::removeLuaFunction(PHANDLE, "scrollingplus", "togglecenter");
@@ -987,6 +1018,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     HyprlandAPI::removeLuaFunction(PHANDLE, "scrollingplus", "focusright");
     HyprlandAPI::removeLuaFunction(PHANDLE, "scrollingplus", "moveleft");
     HyprlandAPI::removeLuaFunction(PHANDLE, "scrollingplus", "moveright");
+    HyprlandAPI::removeLuaFunction(PHANDLE, "scrollingplus", "togglemaximize");
 
 
 
