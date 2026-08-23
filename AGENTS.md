@@ -8,6 +8,26 @@
 - Audience: Users of Omarchy Linux and the scrolling layout.
 - Goals: Zero-jitter partition layout switching and seamless center-mode toggling.
 
+---
+
+## Strict Scope & Architecture Boundaries
+
+1. **Pure Layout Engine Only**:
+   - `hyprscrolling-plus` handles ONLY layout mathematics and rendering:
+     - 1-column, 2-column, 3-column, 4-column partition cycling
+     - Instant Center mode toggle & Zen mode toggle
+     - Column navigation & card-preserving column swaps (`focusleft`, `focusright`, `moveleft`, `moveright`)
+     - Universal Viewport & Tape Model: "Focus is what user sees, not what tape wants."
+     - Internal navigation between already-visible windows MUST NEVER move the camera.
+   - **STRICT PROHIBITION**: `hyprscrolling-plus` MUST NOT contain any process launching, regex matching, app lifecycle, or summoning code. All summoning and lifecycle belong to `hyprsummon`.
+
+2. **Work WITH Omarchy & Hyprland**:
+   - Never create wrapper scripts in `~/.local/bin/` (no overriding `gtk-launch`, `xdg-open`, etc.).
+   - Never create fake `.desktop` files in `~/.local/share/applications/`.
+   - Interact strictly via Hyprland's native compositor API and dispatchers.
+
+---
+
 ## Git And Commit Standards
 
 - **No Auto-Committing**: Agents must never commit autonomously, EXCEPT when executing the Conductor/Jules Orchestrator release workflow where autonomous committing is required upon user approval of the commit message.
