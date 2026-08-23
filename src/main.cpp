@@ -77,6 +77,7 @@ struct SWorkspaceSettings {
     bool zenActive = false;
     int64_t focusFitMethod = 1;
     int partitions = 2;
+    int viewportStartIdx = 0;
 };
 
 static std::unordered_map<WORKSPACEID, SWorkspaceSettings> g_workspaceSettings;
@@ -304,29 +305,32 @@ static void alignActiveColumn(Layout::Tiled::CScrollingAlgorithm* pScrolling, SP
             double marginPixels = (usableArea.width - totalPixelWidth) / 2.0;
             pScrolling->m_scrollingData->controller->setOffset(-marginPixels);
         } else if (pColumn) {
-            // Standard grid alignment for tape larger than monitor: discrete
-            // P-by-P page jumping - [0-1], [2-3], [4-5]. This is the only grid
-            // scroll mode; Filmstrip Queue was removed (never worked correctly,
-            // see scratch/ for the investigation history).
             int active_idx = pScrolling->m_scrollingData->idx(pColumn);
             double col_width = pColumn->getColumnWidth();
             if (col_width <= 0.0) col_width = 0.5;
             int P = std::max(1, (int)std::round(1.0 / col_width));
             int total_cols = (int)pScrolling->m_scrollingData->columns.size();
 
-            // Align viewport so the focused column is paired with its left neighbor if summoned/navigated to right
-            int start_idx = (active_idx / P) * P;
-            if (active_idx >= P && active_idx % P != 0) {
-                start_idx = active_idx - (P - 1);
-            }
-            if (start_idx + P > total_cols) {
-                start_idx = std::max(0, total_cols - P);
-            }
-            if (start_idx < 0) start_idx = 0;
-            if (start_idx > total_cols - 1) start_idx = total_cols - 1;
+            auto& wsSettings = getWorkspaceSettings(ws_id);
+            int start_idx = wsSettings.viewportStartIdx;
 
-            // Use Hyprland's own strip-start calculation (matches what calculateStripBox
-            // uses internally for rendering) instead of a hand-rolled pixel sum.
+            // Anchor-Relative / Continuous Viewport Clamping:
+            // "Focus is what user sees":
+            // - If active_idx is ALREADY within the visible viewport [start_idx, start_idx + P - 1], KEEP IT. ZERO CAMERA DRIFT.
+            // - If active_idx moved to the right (>= start_idx + P), slide viewport right so active_idx is the rightmost column.
+            // - If active_idx moved to the left (< start_idx), slide viewport left so active_idx is the leftmost column.
+            if (active_idx >= start_idx + P) {
+                start_idx = active_idx - P + 1;
+            } else if (active_idx < start_idx) {
+                start_idx = active_idx;
+            }
+
+            int max_start = std::max(0, total_cols - P);
+            if (start_idx > max_start) start_idx = max_start;
+            if (start_idx < 0) start_idx = 0;
+
+            wsSettings.viewportStartIdx = start_idx;
+
             double target_offset = pScrolling->m_scrollingData->controller->calculateStripStart(start_idx, usableArea);
             pScrolling->m_scrollingData->controller->setOffset(target_offset);
         }
