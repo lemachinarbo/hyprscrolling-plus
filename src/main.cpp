@@ -904,23 +904,22 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         std::string newClass = w->m_class;
         std::transform(newClass.begin(), newClass.end(), newClass.begin(), ::tolower);
 
-        // If this app already has an instance parked in the background (name:parked:*), restore it instead of spawning a duplicate!
+        // If an instance of this app already exists anywhere (parked, active, or other workspaces), focus/summon it instead of creating duplicates!
         if (!newClass.empty() && newClass != "foot" && newClass != "ghostty" && newClass != "alacritty" && newClass != "kitty") {
             for (auto const& candidate : Desktop::windowState()->windows()) {
                 if (candidate && candidate != w && candidate->m_workspace && candidate->m_isMapped) {
-                    std::string wsName = candidate->m_workspace->m_name;
-                    if (wsName.rfind("parked:", 0) == 0 || wsName.rfind("name:parked:", 0) == 0 || wsName.rfind("special:", 0) == 0) {
-                        std::string candClass = candidate->m_class;
-                        std::transform(candClass.begin(), candClass.end(), candClass.begin(), ::tolower);
+                    std::string candClass = candidate->m_class;
+                    std::transform(candClass.begin(), candClass.end(), candClass.begin(), ::tolower);
 
-                        if (candClass == newClass || (candClass.find(newClass) != std::string::npos || newClass.find(candClass) != std::string::npos)) {
-                            logState("Restoring parked instance: " + getAddressStr(candidate) + " instead of duplicate spawn");
+                    if (candClass == newClass || (candClass.find(newClass) != std::string::npos || newClass.find(candClass) != std::string::npos)) {
+                        logState("Focusing existing instance: " + getAddressStr(candidate) + " instead of duplicate spawn");
+                        if (candidate->m_workspace->m_id != active_ws_id) {
                             Desktop::globalWindowController()->moveWindowToWorkspace(candidate, w->m_workspace);
-                            Desktop::focusState()->fullWindowFocus(candidate, Desktop::FOCUS_REASON_OTHER);
-                            Config::Actions::closeWindow(w);
-                            refreshWorkspaceTape(active_ws_id, candidate, true);
-                            return;
                         }
+                        Desktop::focusState()->fullWindowFocus(candidate, Desktop::FOCUS_REASON_OTHER);
+                        Config::Actions::closeWindow(w);
+                        refreshWorkspaceTape(active_ws_id, candidate, true);
+                        return;
                     }
                 }
             }
