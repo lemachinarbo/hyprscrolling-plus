@@ -912,6 +912,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     windowMoveToWorkspaceListener = Event::bus()->m_events.window.moveToWorkspace.listen([](PHLWINDOW w, PHLWORKSPACE ws) {
         logState("Window moved to workspace: " + getAddressStr(w));
+        if (w) {
+            w->positionAnimation()->warp(true);
+            w->sizeAnimation()->warp(true);
+            w->finishAnimation();
+        }
         if (w && w->m_workspace) {
             refreshWorkspaceTape(w->m_workspace->m_id);
         }
