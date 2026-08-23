@@ -38,14 +38,24 @@
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
+#include <hyprland/src/managers/KeybindManager.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/config/values/types/BoolValue.hpp>
-#include <hyprland/src/config/values/types/IntValue.hpp>
+#include <hyprland/src/config/ConfigValue.hpp>
 #undef private
+
+#include <regex>
+#include <cctype>
+
 
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+
+extern "C" {
+#include <lua.h>
+#include <lauxlib.h>
+}
 
 static HANDLE PHANDLE = nullptr;
 
@@ -67,8 +77,6 @@ struct SWorkspaceSettings {
     bool zenActive = false;
     int64_t focusFitMethod = 1;
     int partitions = 2;
-    int lastStartIdx = 0;
-    int gridScrollMode = 0; // 0 = Page Flip [P-by-P], 1 = Filmstrip Queue [1-by-1]
 };
 
 static std::unordered_map<WORKSPACEID, SWorkspaceSettings> g_workspaceSettings;
@@ -81,27 +89,18 @@ static int64_t g_globalFocusFitMethod = 1;
 
 static SP<Config::Values::CBoolValue> g_zenModeGlobalConfig;
 static SP<Config::Values::CBoolValue> g_centerModeGlobalConfig;
-static SP<Config::Values::CIntValue>  g_gridScrollModeConfig;
 
-// Helper functions
-static int64_t getConfigValueInt(const std::string& name, int64_t defaultValue) {
-    auto reply = Config::mgr()->getConfigValue(name);
-    if (reply.dataptr && reply.type) {
-        if (*reply.type == typeid(int)) {
-            return *(int*)(*reply.dataptr);
-        } else if (*reply.type == typeid(int64_t)) {
-            return *(int64_t*)(*reply.dataptr);
-        } else if (*reply.type == typeid(long)) {
-            return *(long*)(*reply.dataptr);
-        } else if (*reply.type == typeid(long long)) {
-            return *(long long*)(*reply.dataptr);
-        } else if (*reply.type == typeid(bool)) {
-            return *(bool*)(*reply.dataptr);
-        }
-    }
-    return defaultValue;
-}
-
+// Helper functions.
+//
+// Reads of native Hyprland config keys use Config::Values::CConfigValue<T> at
+// each call site instead (the sanctioned, documented accessor — see
+// ScrollingAlgorithm.cpp upstream for the same pattern). There is no
+// equivalent safe write path: CConfigValue<Config::INTEGER>::ptr() casts
+// blindly to int64_t*, but a key declared as INTEGER may be backed by either
+// `bool` or `int64_t` storage at runtime (see operator*()'s own type branch
+// in ConfigValue.hpp) - writing through ptr() would silently corrupt a
+// bool-backed value. The manual dataptr+type branching below is what
+// actually handles that correctly, so it stays for writes.
 static void setConfigValueInt(const std::string& name, int64_t value) {
     auto reply = Config::mgr()->getConfigValue(name);
     if (reply.dataptr && reply.type) {
@@ -117,20 +116,6 @@ static void setConfigValueInt(const std::string& name, int64_t value) {
             *(bool*)(*reply.dataptr) = (bool)value;
         }
     }
-}
-
-[[maybe_unused]] static bool getConfigValueBool(const std::string& name, bool defaultValue) {
-    auto reply = Config::mgr()->getConfigValue(name);
-    if (reply.dataptr && reply.type) {
-        if (*reply.type == typeid(bool)) {
-            return *(bool*)(*reply.dataptr);
-        } else if (*reply.type == typeid(int)) {
-            return *(int*)(*reply.dataptr) != 0;
-        } else if (*reply.type == typeid(int64_t)) {
-            return *(int64_t*)(*reply.dataptr) != 0;
-        }
-    }
-    return defaultValue;
 }
 
 static void setConfigValueBool(const std::string& name, bool value) {
@@ -184,9 +169,8 @@ void logState(const std::string& action) {
             << " | Zen: " << (wsZen ? "true" : "false")
             << " | FitMethod: " << wsFit << "\n";
 
-    logFile << "  Hyprland Configs -> focus_fit_method: " << getConfigValueInt("scrolling:focus_fit_method", -1)
-            << " | grid_scroll_mode: " << getConfigValueInt("plugin:scrollingplus:grid_scroll_mode", -1)
-            << "\n";
+    static const auto PFITMETHOD = CConfigValue<Config::INTEGER>("scrolling:focus_fit_method");
+    logFile << "  Hyprland Configs -> focus_fit_method: " << *PFITMETHOD << "\n";
 
     PHLWORKSPACE pWorkspace = pActiveMonitor->m_activeWorkspace;
     if (pWorkspace && pWorkspace->m_space && pWorkspace->m_space->algorithm()) {
@@ -264,8 +248,6 @@ static SWorkspaceSettings& getWorkspaceSettings(WORKSPACEID ws_id) {
         settings.zenActive = false;
         settings.focusFitMethod = 1; // 1 = Grid Partition Mode (Hyprland fitCol)
         settings.partitions = 2;
-        settings.lastStartIdx = 0;
-        settings.gridScrollMode = 0; // Default 0 = Page Flip [P-by-P]
         g_workspaceSettings[ws_id] = settings;
     }
     return g_workspaceSettings[ws_id];
@@ -322,49 +304,39 @@ static void alignActiveColumn(Layout::Tiled::CScrollingAlgorithm* pScrolling, SP
             double marginPixels = (usableArea.width - totalPixelWidth) / 2.0;
             pScrolling->m_scrollingData->controller->setOffset(-marginPixels);
         } else if (pColumn) {
-            // Standard grid alignment for tape larger than monitor
+            // Standard grid alignment for tape larger than monitor: discrete
+            // P-by-P page jumping - [0-1], [2-3], [4-5]. This is the only grid
+            // scroll mode; Filmstrip Queue was removed (never worked correctly,
+            // see scratch/ for the investigation history).
             int active_idx = pScrolling->m_scrollingData->idx(pColumn);
             double col_width = pColumn->getColumnWidth();
             if (col_width <= 0.0) col_width = 0.5;
             int P = std::max(1, (int)std::round(1.0 / col_width));
             int total_cols = (int)pScrolling->m_scrollingData->columns.size();
 
-            auto& settings = getWorkspaceSettings(ws_id);
-            int grid_mode = settings.gridScrollMode;
-
-            int start_idx = 0;
-            if (grid_mode == 1) {
-                // Filmstrip Queue Mode (Continuous 1-by-1 window sliding)
-                int last = settings.lastStartIdx;
-                if (active_idx > last + P - 1) {
-                    start_idx = active_idx - P + 1;
-                } else if (active_idx < last) {
-                    start_idx = active_idx;
-                } else {
-                    start_idx = last;
-                }
-            } else {
-                // Page Flip Mode (Discrete P-by-P page jumping: [0-1], [2-3], [4-5])
-                start_idx = (active_idx / P) * P;
+            // Align viewport so the focused column is paired with its left neighbor if summoned/navigated to right
+            int start_idx = (active_idx / P) * P;
+            if (active_idx >= P && active_idx % P != 0) {
+                start_idx = active_idx - (P - 1);
             }
-
+            if (start_idx + P > total_cols) {
+                start_idx = std::max(0, total_cols - P);
+            }
             if (start_idx < 0) start_idx = 0;
             if (start_idx > total_cols - 1) start_idx = total_cols - 1;
-            settings.lastStartIdx = start_idx;
 
-            // Direct pixel calculation of tape offset to guarantee 0px center shift:
-            double target_offset = 0.0;
-            for (int i = 0; i < start_idx && i < total_cols; ++i) {
-                if (pScrolling->m_scrollingData->columns[i]) {
-                    target_offset += pScrolling->m_scrollingData->columns[i]->getColumnWidth() * usableArea.width;
-                }
-            }
-            pScrolling->m_scrollingData->controller->setOffset(-target_offset);
+            // Use Hyprland's own strip-start calculation (matches what calculateStripBox
+            // uses internally for rendering) instead of a hand-rolled pixel sum.
+            double target_offset = pScrolling->m_scrollingData->controller->calculateStripStart(start_idx, usableArea);
+            pScrolling->m_scrollingData->controller->setOffset(target_offset);
         }
     }
 
+    // forceInstant=false allows smooth sliding animations so the user maintains
+    // clear spatial awareness when scrolling left and right across the tape.
     pScrolling->m_scrollingData->recalculate(false);
 }
+
 
 static SP<Layout::Tiled::SColumnData> findColumnForWindow(Layout::Tiled::CScrollingAlgorithm* pScrolling, PHLWINDOW pWindow) {
     if (!pScrolling || !pScrolling->m_scrollingData || !pWindow) return nullptr;
@@ -497,7 +469,6 @@ SDispatchResult handleToggleZen(std::string args) {
 
     std::string msg = g_zenModeActive ? "Zen Mode: ENABLED" : "Zen Mode: DISABLED";
     logState(msg);
-    HyprlandAPI::addNotification(PHANDLE, "[hyprscrolling-plus] " + msg, CHyprColor{0.2, 0.8, 1.0, 1.0}, 3000);
 
     syncWorkspaceZenOpacity(activeWS, g_zenModeActive);
     refreshWorkspaceTape(activeWS);
@@ -523,27 +494,8 @@ SDispatchResult handleToggleCenter(std::string) {
 
     std::string msg = (new_fit == 0) ? "Center Mode: ENABLED" : "Center Mode: DISABLED";
     logState(msg);
-    HyprlandAPI::addNotification(PHANDLE, "[hyprscrolling-plus] " + msg, CHyprColor{0.2, 0.8, 1.0, 1.0}, 3000);
 
     refreshWorkspaceTape(activeWS);
-    return {};
-}
-
-SDispatchResult handleToggleGridScrollMode(std::string) {
-    PHLMONITOR pActiveMonitor = Desktop::focusState()->monitor();
-    if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) {
-        return {false, false, "No active workspace"};
-    }
-    WORKSPACEID ws_id = pActiveMonitor->m_activeWorkspace->m_id;
-
-    auto& settings = getWorkspaceSettings(ws_id);
-    settings.gridScrollMode = (settings.gridScrollMode == 0) ? 1 : 0;
-
-    std::string msg = (settings.gridScrollMode == 1) ? "Grid Mode: Filmstrip Queue [1-by-1]" : "Grid Mode: Page Flip [P-by-P]";
-    logState(msg);
-    HyprlandAPI::addNotification(PHANDLE, "[hyprscrolling-plus] " + msg, CHyprColor{0.2, 0.8, 1.0, 1.0}, 3000);
-
-    refreshWorkspaceTape(ws_id);
     return {};
 }
 
@@ -643,8 +595,8 @@ SDispatchResult handleFocusRight(std::string) {
     return {};
 }
 
-SDispatchResult handleMoveLeft(std::string) {
-    logState("Dispatcher: moveleft");
+SDispatchResult handleMoveLeft(std::string args) {
+    logState("Dispatcher: moveleft " + args);
     PHLMONITOR pActiveMonitor = Desktop::focusState()->monitor();
     if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) return {};
 
@@ -655,7 +607,24 @@ SDispatchResult handleMoveLeft(std::string) {
     Layout::Tiled::CScrollingAlgorithm* pScrolling = dynamic_cast<Layout::Tiled::CScrollingAlgorithm*>(pTiled);
     if (!pScrolling || !pScrolling->m_scrollingData) return {};
 
-    PHLWINDOW pActiveWindow = Desktop::focusState()->window();
+    PHLWINDOW pActiveWindow = nullptr;
+    std::string clean = args;
+    if (clean.rfind("address:", 0) == 0) clean = clean.substr(8);
+    while (!clean.empty() && isspace(clean.front())) clean.erase(clean.begin());
+    while (!clean.empty() && isspace(clean.back())) clean.pop_back();
+
+    if (!clean.empty()) {
+        for (auto const& wt : pWorkspace->m_space->targets()) {
+            auto t = wt.lock();
+            if (t && t->window() && getAddressStr(t->window()) == clean) {
+                pActiveWindow = t->window();
+                break;
+            }
+        }
+    }
+    if (!pActiveWindow) {
+        pActiveWindow = Desktop::focusState()->window();
+    }
     if (!pActiveWindow) return {};
 
     SP<Layout::ITarget> pTarget = getTargetForWindow(pActiveWindow);
@@ -683,8 +652,8 @@ SDispatchResult handleMoveLeft(std::string) {
     return {};
 }
 
-SDispatchResult handleMoveRight(std::string) {
-    logState("Dispatcher: moveright");
+SDispatchResult handleMoveRight(std::string args) {
+    logState("Dispatcher: moveright " + args);
     PHLMONITOR pActiveMonitor = Desktop::focusState()->monitor();
     if (!pActiveMonitor || !pActiveMonitor->m_activeWorkspace) return {};
 
@@ -695,7 +664,24 @@ SDispatchResult handleMoveRight(std::string) {
     Layout::Tiled::CScrollingAlgorithm* pScrolling = dynamic_cast<Layout::Tiled::CScrollingAlgorithm*>(pTiled);
     if (!pScrolling || !pScrolling->m_scrollingData) return {};
 
-    PHLWINDOW pActiveWindow = Desktop::focusState()->window();
+    PHLWINDOW pActiveWindow = nullptr;
+    std::string clean = args;
+    if (clean.rfind("address:", 0) == 0) clean = clean.substr(8);
+    while (!clean.empty() && isspace(clean.front())) clean.erase(clean.begin());
+    while (!clean.empty() && isspace(clean.back())) clean.pop_back();
+
+    if (!clean.empty()) {
+        for (auto const& wt : pWorkspace->m_space->targets()) {
+            auto t = wt.lock();
+            if (t && t->window() && getAddressStr(t->window()) == clean) {
+                pActiveWindow = t->window();
+                break;
+            }
+        }
+    }
+    if (!pActiveWindow) {
+        pActiveWindow = Desktop::focusState()->window();
+    }
     if (!pActiveWindow) return {};
 
     SP<Layout::ITarget> pTarget = getTargetForWindow(pActiveWindow);
@@ -725,6 +711,37 @@ SDispatchResult handleMoveRight(std::string) {
     return {};
 }
 
+
+
+
+
+
+
+// Hyprland 0.56's Lua config engine never resolves plugin-registered
+// (addDispatcherV2) dispatchers - hyprctl dispatch / raw IPC unconditionally
+// routes through hl.dispatch() Lua evaluation when a Lua config is active,
+// and that path never consults the dispatcher registry these are added to.
+// Confirmed upstream gap (github.com/hyprwm/Hyprland discussion #14451);
+// the maintainer's own stated workaround is to also expose each dispatcher
+// as a plugin Lua function, callable as hl.plugin.scrollingplus.<name>(...).
+// This wrapper adapts the existing SDispatchResult(std::string) handlers to
+// that calling convention without duplicating their logic.
+template <SDispatchResult (*Handler)(std::string)> static int luaDispatchWrapper(lua_State* L) {
+    std::string args;
+    int nargs = lua_gettop(L);
+    for (int i = 1; i <= nargs; ++i) {
+        if (i > 1) args += " ";
+        if (lua_isinteger(L, i))
+            args += std::to_string(lua_tointeger(L, i));
+        else if (lua_isnumber(L, i))
+            args += std::to_string(lua_tonumber(L, i));
+        else if (lua_isstring(L, i))
+            args += lua_tostring(L, i);
+    }
+    Handler(args);
+    return 0;
+}
+
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     PHANDLE = handle;
     logState("PLUGIN_INIT called");
@@ -741,11 +758,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     // Register custom config values
     g_zenModeGlobalConfig = Hyprutils::Memory::makeShared<Config::Values::CBoolValue>("plugin:scrollingplus:zen_mode_global", "Whether zen mode is global across workspaces", false);
     g_centerModeGlobalConfig = Hyprutils::Memory::makeShared<Config::Values::CBoolValue>("plugin:scrollingplus:center_mode_global", "Whether center mode is global across workspaces", false);
-    g_gridScrollModeConfig = Hyprutils::Memory::makeShared<Config::Values::CIntValue>("plugin:scrollingplus:grid_scroll_mode", "0 for Page Flip, 1 for Filmstrip Queue", 0);
 
     HyprlandAPI::addConfigValueV2(PHANDLE, g_zenModeGlobalConfig);
     HyprlandAPI::addConfigValueV2(PHANDLE, g_centerModeGlobalConfig);
-    HyprlandAPI::addConfigValueV2(PHANDLE, g_gridScrollModeConfig);
 
     setConfigValueInt("scrolling:focus_fit_method", 1);
     g_defaultFocusFitMethod = 1;
@@ -760,7 +775,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:partitions", handlePartitions);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:togglecenter", handleToggleCenter);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:togglezen", handleToggleZen);
-    HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:togglegridscrollmode", handleToggleGridScrollMode);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:focusleft", handleFocusLeft);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:focusright", handleFocusRight);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus:moveleft", handleMoveLeft);
@@ -769,11 +783,22 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_partitions", handlePartitions);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_togglecenter", handleToggleCenter);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_togglezen", handleToggleZen);
-    HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_togglegridscrollmode", handleToggleGridScrollMode);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_focusleft", handleFocusLeft);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_focusright", handleFocusRight);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_moveleft", handleMoveLeft);
     HyprlandAPI::addDispatcherV2(PHANDLE, "scrollingplus_moveright", handleMoveRight);
+
+    // Also register as Lua-callable plugin functions (hl.plugin.scrollingplus.<name>(...))
+    HyprlandAPI::addLuaFunction(PHANDLE, "scrollingplus", "partitions", luaDispatchWrapper<handlePartitions>);
+    HyprlandAPI::addLuaFunction(PHANDLE, "scrollingplus", "togglecenter", luaDispatchWrapper<handleToggleCenter>);
+    HyprlandAPI::addLuaFunction(PHANDLE, "scrollingplus", "togglezen", luaDispatchWrapper<handleToggleZen>);
+    HyprlandAPI::addLuaFunction(PHANDLE, "scrollingplus", "focusleft", luaDispatchWrapper<handleFocusLeft>);
+    HyprlandAPI::addLuaFunction(PHANDLE, "scrollingplus", "focusright", luaDispatchWrapper<handleFocusRight>);
+    HyprlandAPI::addLuaFunction(PHANDLE, "scrollingplus", "moveleft", luaDispatchWrapper<handleMoveLeft>);
+    HyprlandAPI::addLuaFunction(PHANDLE, "scrollingplus", "moveright", luaDispatchWrapper<handleMoveRight>);
+
+
+
 
     // Register event listeners - NONE of these event listeners mutate column widths or scrolling:column_width!
     activeWindowListener = Event::bus()->m_events.window.active.listen([](PHLWINDOW w, auto /* reason */) {
@@ -807,7 +832,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
             if (!centerGlobal) {
                 bool isOldZenActive = zenGlobal ? g_zenModeActive : getWorkspaceSettings(g_lastWorkspaceID).zenActive;
                 if (!isOldZenActive) {
-                    getWorkspaceSettings(g_lastWorkspaceID).focusFitMethod = getConfigValueInt("scrolling:focus_fit_method", 1);
+                    static const auto PFITMETHOD = CConfigValue<Config::INTEGER>("scrolling:focus_fit_method");
+                    getWorkspaceSettings(g_lastWorkspaceID).focusFitMethod = *PFITMETHOD;
                 }
             }
         }
@@ -914,6 +940,16 @@ APICALL EXPORT void PLUGIN_EXIT() {
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus_focusright");
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus_moveleft");
     HyprlandAPI::removeDispatcher(PHANDLE, "scrollingplus_moveright");
+
+    HyprlandAPI::removeLuaFunction(PHANDLE, "scrollingplus", "partitions");
+    HyprlandAPI::removeLuaFunction(PHANDLE, "scrollingplus", "togglecenter");
+    HyprlandAPI::removeLuaFunction(PHANDLE, "scrollingplus", "togglezen");
+    HyprlandAPI::removeLuaFunction(PHANDLE, "scrollingplus", "focusleft");
+    HyprlandAPI::removeLuaFunction(PHANDLE, "scrollingplus", "focusright");
+    HyprlandAPI::removeLuaFunction(PHANDLE, "scrollingplus", "moveleft");
+    HyprlandAPI::removeLuaFunction(PHANDLE, "scrollingplus", "moveright");
+
+
 
     activeWindowListener.reset();
     activeWorkspaceListener.reset();
