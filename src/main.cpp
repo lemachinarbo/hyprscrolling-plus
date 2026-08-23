@@ -276,7 +276,7 @@ static void syncWorkspaceZenOpacity(WORKSPACEID ws_id, bool zenActive) {
 }
 
 // Align viewport tape offset without mutating column widths!
-static void alignActiveColumn(Layout::Tiled::CScrollingAlgorithm* pScrolling, SP<Layout::Tiled::SColumnData> pColumn, int64_t fit_method, WORKSPACEID ws_id) {
+static void alignActiveColumn(Layout::Tiled::CScrollingAlgorithm* pScrolling, SP<Layout::Tiled::SColumnData> pColumn, int64_t fit_method, WORKSPACEID ws_id, bool forceInstant = false) {
     if (!pScrolling || !pScrolling->m_scrollingData || !pScrolling->m_scrollingData->controller) return;
 
     // Always keep Hyprland's native focus_fit_method in sync with fit_method (1 = Grid, 0 = Center):
@@ -338,7 +338,7 @@ static void alignActiveColumn(Layout::Tiled::CScrollingAlgorithm* pScrolling, SP
 
     // forceInstant=false allows smooth sliding animations so the user maintains
     // clear spatial awareness when scrolling left and right across the tape.
-    pScrolling->m_scrollingData->recalculate(false);
+    pScrolling->m_scrollingData->recalculate(forceInstant);
 }
 
 
@@ -357,7 +357,7 @@ static SP<Layout::Tiled::SColumnData> findColumnForWindow(Layout::Tiled::CScroll
 }
 
 // Re-align viewport tape for a workspace without overwriting existing column widths or scrolling:column_width
-static void refreshWorkspaceTape(WORKSPACEID ws_id, PHLWINDOW pExplicitTargetWindow = nullptr) {
+static void refreshWorkspaceTape(WORKSPACEID ws_id, PHLWINDOW pExplicitTargetWindow = nullptr, bool forceInstant = false) {
     if (ws_id == -1) return;
     auto& settings = getWorkspaceSettings(ws_id);
 
@@ -389,7 +389,7 @@ static void refreshWorkspaceTape(WORKSPACEID ws_id, PHLWINDOW pExplicitTargetWin
         pColumn = findColumnForWindow(pScrolling, pTargetWindow);
     }
 
-    alignActiveColumn(pScrolling, pColumn, current_fit, ws_id);
+    alignActiveColumn(pScrolling, pColumn, current_fit, ws_id, forceInstant);
 
     auto pMonitor = pWorkspace->m_monitor.lock();
     if (pMonitor) {
@@ -651,8 +651,9 @@ SDispatchResult handleMoveLeft(std::string args) {
         pScrolling->m_scrollingData->controller->swapStrips(current_idx, current_idx - 1);
     }
 
-    pScrolling->m_scrollingData->recalculate(false);
-    refreshWorkspaceTape(pWorkspace->m_id);
+    bool isProgrammatic = !clean.empty();
+    pScrolling->m_scrollingData->recalculate(isProgrammatic);
+    refreshWorkspaceTape(pWorkspace->m_id, nullptr, isProgrammatic);
     return {};
 }
 
@@ -710,8 +711,9 @@ SDispatchResult handleMoveRight(std::string args) {
         pScrolling->m_scrollingData->controller->swapStrips(current_idx, current_idx + 1);
     }
 
-    pScrolling->m_scrollingData->recalculate(false);
-    refreshWorkspaceTape(pWorkspace->m_id);
+    bool isProgrammatic = !clean.empty();
+    pScrolling->m_scrollingData->recalculate(isProgrammatic);
+    refreshWorkspaceTape(pWorkspace->m_id, nullptr, isProgrammatic);
     return {};
 }
 
