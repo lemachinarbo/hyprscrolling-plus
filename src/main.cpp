@@ -470,7 +470,7 @@ SDispatchResult handleToggleZen(std::string args) {
         getWorkspaceSettings(activeWS).zenActive = g_zenModeActive;
     }
 
-    int64_t target_fit_method = g_zenModeActive ? 1 : (isCenterModeGlobal() ? g_globalFocusFitMethod : getWorkspaceSettings(activeWS).focusFitMethod);
+    int64_t target_fit_method = g_zenModeActive ? 0 : (isCenterModeGlobal() ? g_globalFocusFitMethod : getWorkspaceSettings(activeWS).focusFitMethod);
     setConfigValueInt("scrolling:focus_fit_method", target_fit_method);
 
     std::string msg = g_zenModeActive ? "Zen Mode: ENABLED" : "Zen Mode: DISABLED";
@@ -865,13 +865,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         if (g_lastWorkspaceID != -1) {
             if (!zenGlobal) {
                 getWorkspaceSettings(g_lastWorkspaceID).zenActive = g_zenModeActive;
-            }
-            if (!centerGlobal) {
-                bool isOldZenActive = zenGlobal ? g_zenModeActive : getWorkspaceSettings(g_lastWorkspaceID).zenActive;
-                if (!isOldZenActive) {
-                    static const auto PFITMETHOD = CConfigValue<Config::INTEGER>("scrolling:focus_fit_method");
-                    getWorkspaceSettings(g_lastWorkspaceID).focusFitMethod = *PFITMETHOD;
-                }
             }
         }
 
