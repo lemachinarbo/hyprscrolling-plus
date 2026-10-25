@@ -264,14 +264,34 @@ static PHLWORKSPACE getWorkspaceByID(WORKSPACEID id) {
     return nullptr;
 }
 
-static void syncWorkspaceZenOpacity(WORKSPACEID ws_id, bool zenActive) {
+static void syncWorkspaceZenOpacity(WORKSPACEID ws_id, bool zenActive, PHLWINDOW pActiveWindow = nullptr) {
+    if (!pActiveWindow) {
+        pActiveWindow = Desktop::focusState()->window();
+    }
     for (auto const& w : Desktop::windowState()->windows()) {
-        if (w && w->m_isMapped && !w->isHidden() && w->m_workspace && w->m_workspace->m_id == ws_id && !w->m_isFloating) {
-            bool isActive = Desktop::focusState()->isWindowActive(w);
-            float targetAlpha = (zenActive && !isActive) ? 0.0f : 1.0f;
-            
-            if (w->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)) {
-                w->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)->setValueAndWarp(targetAlpha);
+        if (!w || !w->m_isMapped || w->isHidden() || !w->m_workspace) continue;
+
+        if (w->m_workspace->m_id == ws_id) {
+            if (w->m_isFloating) {
+                if (w->alpha(Desktop::View::WINDOW_ALPHA_LAYOUT)) {
+                    w->alpha(Desktop::View::WINDOW_ALPHA_LAYOUT)->setValueAndWarp(1.0f);
+                }
+            } else {
+                bool isActive = (pActiveWindow && w == pActiveWindow) || Desktop::focusState()->isWindowActive(w);
+                float targetAlpha = (zenActive && !isActive) ? 0.0f : 1.0f;
+
+                if (w->alpha(Desktop::View::WINDOW_ALPHA_LAYOUT)) {
+                    w->alpha(Desktop::View::WINDOW_ALPHA_LAYOUT)->setValueAndWarp(targetAlpha);
+                }
+                // Repair WINDOW_ALPHA_ACTIVE if previously zeroed by older plugin versions
+                if (w->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE) && w->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)->value() < 0.05f) {
+                    w->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE)->setValueAndWarp(1.0f);
+                }
+            }
+        } else {
+            // Ensure windows outside this workspace don't retain 0.0f layout alpha
+            if (w->alpha(Desktop::View::WINDOW_ALPHA_LAYOUT) && w->alpha(Desktop::View::WINDOW_ALPHA_LAYOUT)->value() < 0.95f) {
+                w->alpha(Desktop::View::WINDOW_ALPHA_LAYOUT)->setValueAndWarp(1.0f);
             }
         }
     }
@@ -384,7 +404,11 @@ static void refreshWorkspaceTape(WORKSPACEID ws_id, PHLWINDOW pExplicitTargetWin
         }
     }
 
-    int64_t current_fit = settings.zenActive ? 0 : settings.focusFitMethod;
+    bool zenGlobal = isZenModeGlobal();
+    bool isZenActive = zenGlobal ? g_zenModeActive : settings.zenActive;
+    syncWorkspaceZenOpacity(ws_id, isZenActive, pTargetWindow);
+
+    int64_t current_fit = isZenActive ? 0 : settings.focusFitMethod;
 
     SP<Layout::Tiled::SColumnData> pColumn = nullptr;
     if (pTargetWindow) {
@@ -842,12 +866,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         logState("Focus changed to " + getAddressStr(w));
         if (w && w->m_workspace) {
             WORKSPACEID ws_id = w->m_workspace->m_id;
-            bool zenGlobal = isZenModeGlobal();
-            bool isZenActive = zenGlobal ? g_zenModeActive : getWorkspaceSettings(ws_id).zenActive;
-            
-            if (isZenActive) {
-                syncWorkspaceZenOpacity(ws_id, true);
-            }
             refreshWorkspaceTape(ws_id, w);
         }
     });
@@ -1005,6 +1023,12 @@ APICALL EXPORT void PLUGIN_EXIT() {
     if (pFullscreenRestoreTimer) {
         pFullscreenRestoreTimer->cancel();
         pFullscreenRestoreTimer.reset();
+    }
+
+    for (auto const& w : Desktop::windowState()->windows()) {
+        if (w && w->alpha(Desktop::View::WINDOW_ALPHA_LAYOUT)) {
+            w->alpha(Desktop::View::WINDOW_ALPHA_LAYOUT)->setValueAndWarp(1.0f);
+        }
     }
 
     g_zenModeGlobalConfig.reset();
